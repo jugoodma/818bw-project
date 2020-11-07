@@ -13,6 +13,8 @@ Start a mobile hotspot:
 Connect to root, typically <http://192.168.1.186>.
 If not, run `ipconfig` (windows) or `ifconfig` (linux) and look for `IPv4 Address` (windows) or `inet` (linux).
 
+Make sure you add port `:42`.
+
 ## API
 
 

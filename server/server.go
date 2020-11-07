@@ -14,6 +14,9 @@ import (
 	"github.com/google/uuid"
 )
 
+var ogm map[int]map[int]float64
+var bot []string // [int ID] -> "ip-addr"
+
 const (
 	statusQueued   = "queued"
 	statusStarted  = "started"
@@ -107,14 +110,20 @@ func (ds DataStore) put(jobid string) {
 	}
 }
 
+// main server
 func main() {
-	log.Println("starting server.")
+	// OGM setup
+	log.Println("Occupancy Grid Mapping setup.")
+	ogm = map[int]map[int]float64{}
+	bot = make([]string, 3) // num robots
+
+	log.Println("Starting server.")
 	// option to run port on a given input argument
 	port := 42
 	if len(os.Args) > 1 {
 		port, _ = strconv.Atoi(os.Args[1])
 	}
-	log.Printf(" running on port %v\n", port)
+	log.Printf("  server running on port %v\n", port)
 	// init http server
 	server := &http.Server{Addr: ":" + strconv.Itoa(port)}
 	// create a datastore
