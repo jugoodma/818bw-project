@@ -15,8 +15,24 @@ HTTPClient http;
 
 // ip-address?
 // server-given bot ID?
+const int pingPin = 12; // Trigger Pin of Ultrasonic Sensor
+const int echoPin = 13; // Echo Pin of Ultrasonic Sensor
 
-//
+void oursend(){
+   long duration;
+   byte buf[4];
+   pinMode(pingPin, OUTPUT);
+   digitalWrite(pingPin, LOW);
+   delayMicroseconds(2);
+   digitalWrite(pingPin, HIGH);
+   delayMicroseconds(10);
+   digitalWrite(pingPin, LOW);
+   pinMode(echoPin, INPUT);
+   duration = pulseIn(echoPin, HIGH);
+   memcpy(buf, &duration, 4);
+   Serial.write(buf,4);
+   delay(100);
+}
 
 void setup() {
     // start
