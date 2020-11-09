@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -10,104 +9,28 @@ import (
 	"os"
 	"strconv"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 var ogm map[int]map[int]float64
-var bot []string // [int ID] -> "ip-addr"
+var bot map[string]int // "ip-addr" -> int ID
+var botCount int = 0
 
-const (
-	statusQueued   = "queued"
-	statusStarted  = "started"
-	statusFinished = "finished"
-	statusError    = "error"
-)
-
-const (
-	jobGet = "get"
-	jobPut = "put"
-	jobEnd = "end"
-)
-
-type edit struct {
-	jobTime   time.Time // time at which this edit was created
-	JobID     string    `json:"job_id"`
-	JobType   string    `json:"job_type"`
-	JobStatus string    `json:"job_status"`
-	Name      string    `json:"name"`
-	Value     string    `json:"value"`
+type measurement struct {
+	receivedTime time.Time
+	receivedFrom string // ip-addr
+	localGridRow int
+	localGridCol int
+	occupancyVal float64
 }
 
-// DataStore ...
-type DataStore struct {
-	data   map[string]int       // "whatever" -> ###
-	timing map[string]time.Time // "key" -> last updated
-	edits  map[string]*edit     // "jobid uuid4" -> message
-	jobs   chan string
-}
+var sensorData chan *measurement
 
-func performCalculation() {
-	// you can imagine maybe we do some image processing here, etc
-	time.Sleep(5 * time.Second)
-}
+var isLocalized = false
 
-// the (ds DataStore) here says that the function httpget is an instance
-// function inside any DataStore type struct.
-func (ds DataStore) httpget(w http.ResponseWriter, req *http.Request) {
-	log.Printf("get %v", req)
-	name := req.URL.Query().Get("name")
-	if val, ok := ds.data[name]; ok {
-		fmt.Fprintf(w, "%s: %d\n", name, val)
-	} else {
-		fmt.Fprintf(w, "%s not found\n", name)
-	}
-}
-
-func (ds DataStore) httpput(w http.ResponseWriter, req *http.Request) {
-	log.Printf("put %v", req)
-	id := uuid.New().String() // create uuid for request
-	ds.edits[id] = &edit{
-		jobTime:   time.Now(),
-		JobID:     id,
-		JobType:   jobPut,
-		JobStatus: statusQueued,
-		Name:      req.URL.Query().Get("name"),
-		Value:     req.URL.Query().Get("val"),
-	}
-	ds.jobs <- id // put request into processing channel
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"job_id": id})
-}
-
-// retrieve job info from given input argument
-func (ds DataStore) httpjob(w http.ResponseWriter, req *http.Request) {
-	log.Printf("job %v", req)
-	jobid := req.URL.Query().Get("id")
-	if val, ok := ds.edits[jobid]; ok {
-		// job exists
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(val)
-	} else {
-		fmt.Fprintf(w, "%s not found\n", jobid)
-	}
-}
-
-func (ds DataStore) get(jobid string) {
-	e := ds.edits[jobid]
-	e.Value = strconv.Itoa(ds.data[e.Name])
-	e.JobStatus = statusFinished
-}
-
-func (ds DataStore) put(jobid string) {
-	e := ds.edits[jobid]
-	if intval, err := strconv.Atoi(e.Value); err != nil || ds.timing[e.Name].After(e.jobTime) {
-		e.JobStatus = statusError
-	} else {
-		ds.data[e.Name] = intval
-		ds.timing[e.Name] = time.Now()
-		e.JobStatus = statusFinished
-	}
+func doLocalization(seconds int) bool {
+	time.Sleep(time.Duration(seconds) * time.Second)
+	isLocalized = true
+	return true
 }
 
 // main server
@@ -115,8 +38,9 @@ func main() {
 	// OGM setup
 	log.Println("Occupancy Grid Mapping setup.")
 	ogm = map[int]map[int]float64{}
-	bot = make([]string, 3) // num robots
+	bot = map[string]int{}
 
+	// http setup
 	log.Println("Starting server.")
 	// option to run port on a given input argument
 	port := 42
@@ -126,41 +50,51 @@ func main() {
 	log.Printf("  server running on port %v\n", port)
 	// init http server
 	server := &http.Server{Addr: ":" + strconv.Itoa(port)}
-	// create a datastore
-	store := DataStore{
-		data:   map[string]int{},
-		timing: map[string]time.Time{},
-		edits:  map[string]*edit{},
-		jobs:   make(chan string),
-	}
+
+	// other shit
 	// set up endpoint stop
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// set up http path handlers
-	http.HandleFunc("/get", store.httpget)
-	http.HandleFunc("/put", store.httpput)
-	http.HandleFunc("/job", store.httpjob)
 	http.HandleFunc("/end", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(store.data) // send datastore to user
+		// nothing to do yet
+		log.Println("Termination signal received...")
 		cancel()
 	})
-
 	http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
-		log.Println("Registration...")
+		log.Println("Registration signal received...")
 		switch r.Method {
-		case "GET":
-			log.Println("GET registration?")
 		case "POST":
 			reqBody, err := ioutil.ReadAll(r.Body)
 			if err != nil {
 				log.Fatal(err)
 			}
-			fmt.Printf("%s\n", reqBody)
-			w.Write([]byte("Noted.\n"))
+			fmt.Printf("%s\n", reqBody) // this was the request body
+			// get request ip address
+			if _, ok := bot[r.RemoteAddr]; !ok {
+				// found a new address!
+				bot[r.RemoteAddr] = botCount
+				botCount++
+				// TODO -- do we need to handle non-static ip distribution? probably :(
+				w.Write([]byte("Noted.\n"))
+			} else {
+				w.Write([]byte("Already registered.\n"))
+			}
 		default:
 			w.WriteHeader(http.StatusNotImplemented)
 			w.Write([]byte(http.StatusText(http.StatusNotImplemented)))
+		}
+	})
+	http.HandleFunc("/localize", func(w http.ResponseWriter, r *http.Request) {
+		// send channel signal to start localization
+		log.Println("Localization signal received...")
+		if isLocalized {
+			log.Println("  already localized.")
+			w.Write([]byte("Already localized.\n"))
+		} else {
+			log.Println("   starting localization in 4 seconds.")
+			go doLocalization(4)
+			w.Write([]byte("Localization starting.\n"))
 		}
 	})
 
@@ -174,31 +108,16 @@ func main() {
 		}
 	}()
 
+	// wait for localization a-go
+	for {
+
+	}
+
 	// spawn data processing thread
 	go func() {
 		// process jobs from datastore channel
-		for id := range store.jobs { // since this is a channel, it will iterate forever
-			if e, ok := store.edits[id]; !ok {
-				log.Fatalf("Could not find job_id %s\n", id)
-			} else {
-				e.JobStatus = statusStarted
-				switch e.JobType {
-				case jobEnd:
-					cancel()
-				case jobGet:
-					go func() {
-						performCalculation()
-						store.get(id)
-					}()
-				case jobPut:
-					go func() {
-						performCalculation()
-						store.put(id)
-					}()
-				default:
-					log.Fatalf("unidentified jobType for edit %v\n", e)
-				}
-			}
+		for m := range sensorData { // since this is a channel, it will iterate forever
+			fmt.Println(m)
 		}
 	}()
 
