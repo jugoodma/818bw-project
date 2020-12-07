@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <Wire.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
@@ -8,72 +7,88 @@
 #define echoPin 5
 #define trigPin 4
 #define speakerPin 2
-#define SCLPin 13
-#define SDAPin 12
-#define INTPin 14
 
 const char* ssid = "bot";
 const char* password = "dankmemes";
 ESP8266WebServer server(80);
 int ID = -1;
-
-boolean tb = true;
 unsigned long myTime;
-
-const int MPU6050_addr=0x68;
-int16_t AccX,AccY,AccZ,Temp,GyroX,GyroY,GyroZ;
-
-long sumR;
-long sumL;
 
 void setup() {
   Serial.begin(9600);
   sound_setup();
   internet_setup();
-  delay(3000);
-  //listen_sig(1000,500);
+  boolean sync = false;
+  char buf[1];
+  while(!sync){
+    if(Serial.available()){
+      Serial.readBytes(buf,1);
+      if(buf[0] == 's'){
+        Serial.write('a');
+        Serial.flush();
+        sync = true;
+      } 
+    }
+    delay(10);
+  }
 }
+
 void loop() {
   server.handleClient();
 }
 
+void sound_setup(){
+  pinMode(speakerPin, OUTPUT);
+}
+
+void usonic_setup(){
+  pinMode(echoPin, INPUT);
+  pinMode(trigPin, OUTPUT);
+}
+
 void internet_setup(){
   WiFi.begin(ssid, password);
-
-  // Wait for connection
-  while (WiFi.status() != WL_CONNECTED) {
+  while (WiFi.status() != WL_CONNECTED)
     delay(500);
-  }
   while(ID < 0){
     pingServer();  
     delay(1000);
   }
-
   server.on("/", handleRoot);
-
-  server.on("/loc", getPostData);
+  server.on("/loc", getLocData);
+  server.on("/mov", getMovData);
   server.onNotFound(handleNotFound);
   server.begin();
-//  Serial.println("HTTP server started");
 }
 
-void getPostData(){
+void getLocData(){
   String message = ""; message += millis();
   String body = server.arg("plain");
   server.send(200, "text/plain", message);
   int comma = body.indexOf(',');
   int postTime = body.substring(comma+1,body.indexOf(',', comma+1)).toInt();
   int postDelay = body.substring(body.indexOf(',', comma + 1)+1).toInt();  
-  if(body.charAt(0) == 'l'){
+  if(body.charAt(0) == 'l')
     listen_sig(postTime, postDelay);
-  }else if(body.charAt(0) == 's'){
+  else if(body.charAt(0) == 's')
     speaker_sig(postTime, postDelay);
-  }
+}
+
+void getMovData(){
+  String message = "Hello there! General Kenobi.";
+  String body = server.arg("plain");
+  server.send(200, "text/plain", message);
+  int comma = body.indexOf(',');
+  int param = body.substring(comma+1).toInt();
+  char sig = body.charAt(0);
+  if(sig == 'f'||sig=='b'||sig=='r')
+    motor_sig(sig-32,param);
 }
 
 void handleRoot() {
   server.send(200, "text/plain", "hello from esp8266!");
 }
+
 void handleNotFound(){
   server.send(404, "text/plain", ":(");
 }
@@ -133,29 +148,17 @@ void speaker_sig(int postTime, int delayTime){
   sendLoc(message);
 }
 
-void usonic_setup(){
-  pinMode(echoPin, INPUT);
-  pinMode(trigPin, OUTPUT);
+void motor_sig(char sig, int param){
+  byte outBuf[5];
+  memcpy(outBuf, &sig, 1);
+  memcpy(outBuf+1, &param,2);
+  memcpy(outBuf+3, &param, 2);
+  Serial.write(outBuf,5);
+  Serial.flush();
 }
-
-void sound_setup(){
-  pinMode(speakerPin, OUTPUT);
-  sumR = 0; sumL = 0;
-}
-
-void accel_setup(){
-  Wire.begin();
-  Wire.beginTransmission(MPU6050_addr);
-  Wire.write(0x6B);
-  Wire.write(0);
-  Wire.endTransmission(true);
-}
-
 void pingServer(){
   HTTPClient http;
-//  Serial.print("[HTTP] begin...\n");
   if (http.begin("http://192.168.1.186:42/reg")) {
-        // start connection and send HTTP header
     myTime = millis();
     String message = "{\"clock\":";
     message += myTime;
@@ -179,18 +182,17 @@ void pingServer(){
 
 void sendLoc(String message){
   HTTPClient http;
-  if (http.begin("http://192.168.1.186:42/loc")) {
+  if (http.begin("http://192.168.1.186:42/loc")){
     int httpCode = http.POST(message);
-    if (httpCode > 0) {
-      if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
-        String payload = http.getString();
-      }
-    } else {
-      Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
-    }
     http.end();
-  } else {
-    Serial.printf("[HTTP} Unable to connect\n");
+  }
+}
+
+void sendMov(String message){
+  HTTPClient http;
+  if (http.begin("http://192.168.1.186:42/mov")){
+    int httpCode = http.POST(message);
+    http.end();
   }
 }
 
