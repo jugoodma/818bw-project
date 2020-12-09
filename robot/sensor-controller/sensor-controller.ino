@@ -8,8 +8,6 @@
 #include <ESP8266HTTPUpdateServer.h>
 
 ESP8266WiFiMulti WiFiMulti; // ?
-WiFiClient client;
-HTTPClient http;
 
 // variables for server commands
 
@@ -34,7 +32,9 @@ void setup() {
     Serial.println(WiFi.localIP()); // we send this to the server
 
     // register with server
-    http.begin(client, "http://192.168.1.186:42/register")
+    WiFiClient client;
+    HTTPClient http;
+    http.begin(client, "http://192.168.1.186:42/register");
     int httpCode = http.POST("{}");
     Serial.println(httpCode);
     if (httpCode == HTTP_CODE_OK) {
@@ -67,6 +67,8 @@ void loop() {
     // wait for WiFi connection
     if ((WiFiMulti.run() == WL_CONNECTED)) {
         Serial.print("[HTTP] begin...\n");
+        WiFiClient client;
+        HTTPClient http;
         if (http.begin(client, "http://jigsaw.w3.org/HTTP/connection.html")) {  // HTTP
             Serial.print("[HTTP] GET...\n");
             // start connection and send HTTP header

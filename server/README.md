@@ -9,6 +9,7 @@ docker run -it --rm -p 42:42 818b
 Start a mobile hotspot:
 - SSID: `bot`
 - PASS: `dankmemes`
+(your hotspot signal might need to run on 2.4GHz, or whatever band your wifi board uses)
 
 Connect to root, typically <http://192.168.1.186>.
 If not, run `ipconfig` (windows) or `ifconfig` (linux) and look for `IPv4 Address` (windows) or `inet` (linux).
