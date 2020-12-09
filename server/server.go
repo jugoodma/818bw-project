@@ -134,6 +134,7 @@ func main() {
 	clocks = make([]int64, 0)
 	loc = make(chan *locPostData, 2)
 
+	// http setup
 	log.Println("Starting server.")
 	// option to run port on a given input argument
 	port := 42
