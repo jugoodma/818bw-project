@@ -17,7 +17,7 @@ unsigned long myTime;
 void setup() {
   Serial.begin(9600);
   sound_setup();
-  internet_setup();
+  usonic_setup();
   boolean sync = false;
   char buf[1];
   while(!sync){
@@ -31,6 +31,7 @@ void setup() {
     }
     delay(10);
   }
+  internet_setup();
 }
 
 void loop() {
@@ -83,14 +84,6 @@ void getMovData(){
   char sig = body.charAt(0);
   if(sig == 'f'||sig=='b'||sig=='r')
     motor_sig(sig-32,param);
-}
-
-void handleRoot() {
-  server.send(200, "text/plain", "hello from esp8266!");
-}
-
-void handleNotFound(){
-  server.send(404, "text/plain", ":(");
 }
 
 void listen_sig(int postTime, int delayTime){
@@ -150,9 +143,17 @@ void speaker_sig(int postTime, int delayTime){
 
 void motor_sig(char sig, int param){
   byte outBuf[5];
+  long duration,cm;
   memcpy(outBuf, &sig, 1);
   memcpy(outBuf+1, &param,2);
   memcpy(outBuf+3, &param, 2);
+  
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  // Reads the echoPin, returns the sound wave travel time in microseconds
+  duration = pulseIn(echoPin, HIGH);
+  cm = microsecondsToCentimeters(duration);
   Serial.write(outBuf,5);
   Serial.flush();
 }
@@ -171,12 +172,8 @@ void pingServer(){
         String payload = http.getString();
         ID = payload.toInt();
       }
-    } else {
-      Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
     }
     http.end();
-  } else {
-    Serial.printf("[HTTP} Unable to connect\n");
   }
 }
 
@@ -210,6 +207,14 @@ void test_usonic(){
   Serial.print(cm);
   Serial.print("cm");
   Serial.println();
+}
+
+void handleRoot() {
+  server.send(200, "text/plain", "hello from esp8266!");
+}
+
+void handleNotFound(){
+  server.send(404, "text/plain", ":(");
 }
 
 long microsecondsToInches(long microseconds) {
