@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -11,34 +13,126 @@ import (
 	"time"
 )
 
+/*
+bot local IP may be different than net/http request remoteAddr
+	but we need the bot IP to send communications to the bot
+	and we need the bot remoteAddr to know who sends _us_ what
+*/
 var ogm map[int]map[int]float64
-var bot map[string]int // "ip-addr" -> int ID
-var botCount int = 0
+var bot []string          // [int ID] -> "ip-addr"
+var remote map[string]int // "bot remote addr" -> int ID      TODO delete
+var clocks []int64        // [int ID] -> millisecond start time offset
+var n int = 5             // total number of bots
 
-type measurement struct {
-	receivedTime time.Time
-	receivedFrom string // ip-addr
-	localGridRow int
-	localGridCol int
-	occupancyVal float64
+type key int
+
+const (
+	requestIDKey key = 0
+)
+
+// registration received json
+//  data returned from bot POSTing to us
+type regPostData struct {
+	Clock int64  `json:"clock,omitempty"`
+	IP    string `json:"ip,omitempty"`
 }
 
-var sensorData chan *measurement
+// localization received json
+//  data returned from bot POSTing to us
+type locPostData struct {
+	ID    int     `json:"id"`
+	Start int64   `json:"start,omitempty"`
+	Left  []int64 `json:"left,omitempty"`
+	Right []int64 `json:"right,omitempty"`
+}
 
-var isLocalized = false
+// movement POST return json
+//  data returned from us POSTing to the bot
+type movRetData struct {
+	ID       int    `json:"id"`
+	Gyrodata string `json:"gryodata,omitempty"`
+}
 
-func doLocalization(seconds int) bool {
-	time.Sleep(time.Duration(seconds) * time.Second)
-	isLocalized = true
-	return true
+var loc chan *locPostData
+
+func makeTimestamp() int64 {
+	return time.Now().UnixNano() / int64(time.Millisecond)
+}
+
+// server middleware for logging
+func logging(logger *log.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				requestID, ok := r.Context().Value(requestIDKey).(string)
+				if !ok {
+					requestID = "unknown"
+				}
+				logger.Printf("[%v %v] <%v> %v (%v)\n", r.Method, r.URL.Path, r.RemoteAddr, r.UserAgent(), requestID)
+			}()
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+func tracing(nextRequestID func() string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestID := r.Header.Get("X-Request-Id")
+			if requestID == "" {
+				requestID = nextRequestID()
+			}
+			ctx := context.WithValue(r.Context(), requestIDKey, requestID)
+			w.Header().Set("X-Request-Id", requestID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+func doLocPost(data string, botID int) []byte {
+	reqBody := []byte(data)
+	resp, err := http.Post("http://"+bot[botID]+"/loc", "application/text", bytes.NewBuffer(reqBody))
+	if err != nil {
+		fmt.Printf(" doLocPost response error -- %v\n", err)
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf(" doLocPost body-read error -- %v\n", err)
+	}
+	return body
+}
+
+type movCMD string
+
+const (
+	movForward  movCMD = "f"
+	movBackward movCMD = "b"
+	movRotate   movCMD = "r"
+)
+
+func doMovPost(c movCMD, l int, botID int) []byte {
+	reqBody := []byte(fmt.Sprintf("%v,%d", c, l))
+	resp, err := http.Post("http://"+bot[botID]+"/mov", "application/text", bytes.NewBuffer(reqBody))
+	if err != nil {
+		fmt.Printf(" doMovPost response error -- %v\n", err)
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf(" doMovPost body-read error -- %v\n", err)
+	}
+	return body
 }
 
 // main server
 func main() {
 	// OGM setup
 	log.Println("Occupancy Grid Mapping setup.")
-	ogm = map[int]map[int]float64{}
-	bot = map[string]int{}
+	ogm = make(map[int]map[int]float64)
+	bot = make([]string, 0) // num robots
+	remote = make(map[string]int)
+	clocks = make([]int64, 0)
+	loc = make(chan *locPostData, 2)
 
 	// http setup
 	log.Println("Starting server.")
@@ -47,78 +141,149 @@ func main() {
 	if len(os.Args) > 1 {
 		port, _ = strconv.Atoi(os.Args[1])
 	}
-	log.Printf("  server running on port %v\n", port)
-	// init http server
-	server := &http.Server{Addr: ":" + strconv.Itoa(port)}
+	log.Printf("  server will run on port %v\n", port)
 
-	// other shit
-	// set up endpoint stop
+	// create logger
+	logger := log.New(os.Stdout, "[ROUTER] ", log.LstdFlags)
+	// create router
+	router := http.NewServeMux()
+	//   set up endpoint stop
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// set up http path handlers
-	http.HandleFunc("/end", func(w http.ResponseWriter, r *http.Request) {
-		// nothing to do yet
-		log.Println("Termination signal received...")
+	router.HandleFunc("/end", func(w http.ResponseWriter, r *http.Request) {
+		// w.Header().Set("Content-Type", "application/json")
+		// print whatever statistics
+		w.Write([]byte("server closed."))
 		cancel()
 	})
-	http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
-		log.Println("Registration signal received...")
+	router.HandleFunc("/reg", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("Someone wants to register...")
 		switch r.Method {
 		case "POST":
-			reqBody, err := ioutil.ReadAll(r.Body)
+			reqBodyBytes, err := ioutil.ReadAll(r.Body)
+			// log.Printf("%v\n", reqBodyBytes)
 			if err != nil {
 				log.Fatal(err)
 			}
-			fmt.Printf("%s\n", reqBody) // this was the request body
-			// get request ip address
-			if _, ok := bot[r.RemoteAddr]; !ok {
-				// found a new address!
-				bot[r.RemoteAddr] = botCount
-				botCount++
-				// TODO -- do we need to handle non-static ip distribution? probably :(
-				w.Write([]byte("Noted.\n"))
-			} else {
-				w.Write([]byte("Already registered.\n"))
+			reqBody := &regPostData{}
+			err = json.Unmarshal(reqBodyBytes, reqBody)
+			if err != nil {
+				log.Fatal(err)
 			}
+			log.Printf("  %v\n", reqBody)
+			// see if ip has registered already
+			newID := -1
+			for id, ip := range bot {
+				if ip == reqBody.IP {
+					// robot has registered already
+					newID = id
+				}
+			}
+			if newID == -1 {
+				// new robot
+				newID = len(bot)
+				newIP := reqBody.IP
+				log.Printf("  %v -> %v\n", newID, newIP)
+				bot = append(bot, newIP)
+				remote[r.RemoteAddr] = newID
+				clocks = append(clocks, makeTimestamp()-reqBody.Clock) // move calculation up?
+			}
+
+			w.Write([]byte(strconv.Itoa(newID)))
 		default:
 			w.WriteHeader(http.StatusNotImplemented)
 			w.Write([]byte(http.StatusText(http.StatusNotImplemented)))
 		}
 	})
-	http.HandleFunc("/localize", func(w http.ResponseWriter, r *http.Request) {
-		// send channel signal to start localization
-		log.Println("Localization signal received...")
-		if isLocalized {
-			log.Println("  already localized.")
-			w.Write([]byte("Already localized.\n"))
-		} else {
-			log.Println("   starting localization in 4 seconds.")
-			go doLocalization(4)
-			w.Write([]byte("Localization starting.\n"))
+	/*
+		server will receive localization data from robots
+		from speaker:
+		- clock offset time when robot _started_ playing speaker
+
+		from listener:
+		- clock offset time when robot _started_ recording
+		- integer array of amplitude samples from LEFT microphone
+		- integer array of amplitude samples from RIGHT microphone
+
+		then just ship these data into the localization channel (var loc chan *locPostData)
+		which will be received by the localization thread
+	*/
+	router.HandleFunc("/loc", func(w http.ResponseWriter, r *http.Request) {
+		// botID, ok := remote[r.RemoteAddr]
+		// if !ok {
+		// 	fmt.Printf("%v not found in remote map\n", r.RemoteAddr)
+		// }
+		switch r.Method {
+		case "POST":
+			reqBodyBytes, err := ioutil.ReadAll(r.Body)
+			if err != nil {
+				log.Fatal(err)
+			}
+			reqBody := &locPostData{}
+			err = json.Unmarshal(reqBodyBytes, reqBody)
+			if err != nil {
+				log.Fatal(err)
+			}
+			// reqBody.id = botID
+			log.Printf("  %v\n", reqBody)
+			loc <- reqBody
+			w.Write([]byte(`thanks!`))
+		default:
+			w.WriteHeader(http.StatusNotImplemented)
+			w.Write([]byte(http.StatusText(http.StatusNotImplemented)))
 		}
 	})
+	nextRequestID := func() string {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	server := &http.Server{
+		Addr:    ":" + strconv.Itoa(port),
+		Handler: tracing(nextRequestID)(logging(logger)(router)),
+	}
 
 	// spawn http server thread
 	go func() {
 		// always returns error. ErrServerClosed on graceful close
-		log.Println("listening...")
+		log.Println("server listening...")
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
 			// unexpected error. port in use?
 			log.Fatalf("ListenAndServe(): %v", err)
 		}
 	}()
 
-	// wait for localization a-go
-	for {
-
-	}
-
-	// spawn data processing thread
+	// spawn processor thread
 	go func() {
-		// process jobs from datastore channel
-		for m := range sensorData { // since this is a channel, it will iterate forever
-			fmt.Println(m)
+		log.Println("calculation initializing...")
+		// localization setup
+		for {
+			if len(bot) >= n {
+				break
+			}
 		}
+		time.Sleep(time.Second * 2)
+		log.Printf("[DATA] %v bot(s) have registered -- starting localization procedure\n", len(bot))
+		// assume num_bots >= 3
+		// assume leader == 0 -- this is the bot we localize relative to
+		// (1) localize 1 to 0
+		// TODO -> parameterize 1000 and 500
+		fmt.Println(string(doLocPost(`l,1000,500`, 0))) // s0 (l == listen)
+		fmt.Println(string(doLocPost(`s,1000,500`, 1))) // s1 (s == speak)
+		// wait for (1) localization data (block)
+		// TODO do shit with this data
+		fmt.Printf("%v\n", <-loc)
+		fmt.Printf("%v\n", <-loc)
+		fmt.Println(string(doMovPost(movForward, 20, 0))) // move 0 forward
+		//
+		fmt.Println(string(doLocPost(`l,1000,500`, 0)))
+		fmt.Println(string(doLocPost(`s,1000,500`, 1)))
+		fmt.Printf("%v\n", <-loc)
+		fmt.Printf("%v\n", <-loc)
+		fmt.Println(string(doMovPost(movBackward, 20, 0)))
+		// done localization
+		log.Println("[DATA] localization completed.")
+		// start planning and exploration
+
+		cancel()
 	}()
 
 	// block wait for shutdown
