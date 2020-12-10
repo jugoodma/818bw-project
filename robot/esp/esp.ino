@@ -76,9 +76,9 @@ float read_ult(int samples) {
 }
 
 void beep(int ms, int hz) {
-  analogWrite(speakerPin, hz);
-  delay(ms);
-  analogWrite(speakerPin, 0);
+  // CAREFUL, tone will interfere with PWM output on pins 3 and 11
+  // in our schematic, should be ok?
+  tone(speakerPin, hz, ms);
 }
 
 void internet_setup(){
@@ -93,6 +93,7 @@ void internet_setup(){
   server.on("/loc", getLocData);
   server.on("/mov", getMovData);
   server.on("/ult", getUltData);
+  server.on("/bep", getBepData);
   server.onNotFound(handleNotFound);
   server.begin();
 }
@@ -126,6 +127,13 @@ void getMovData(){
 void getUltData() {
   int samples = server.arg("plain").toInt();
   server.send(200, "text/plain", String(read_ult(samples)));
+}
+
+void getBepData() {
+  // just do a beep routine
+  int hz = server.arg("plain").toInt();
+  beep(100, hz);
+  server.send(200, "text/plain", "bepis\n");
 }
 
 void listen_sig(int postTime, int delayTime){
@@ -239,15 +247,16 @@ void motor_sig(char sig, int param) {
       memcpy(out_buf, &sig, 1);
       memcpy(out_buf+1, &max_motor_time, 2);
       memcpy(out_buf+3, &max_motor_time, 2);
-      while (Serial.availableForWrite() < 5) {;}
+      //while (Serial.availableForWrite() < 5) {;}
       Serial.write(out_buf, 5);
-      Serial.flush(); // wait until buffer is fully written
+      //Serial.flush(); // wait until buffer is fully written
       // repeat
       // beep(max_motor_time, 110);
       delay(2*max_motor_time);
     }
     beep(100, 110);
-    beep(200, 130);
+    delay(200);
+    beep(200, 264);
   }
 }
 
