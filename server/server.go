@@ -17,12 +17,14 @@ import (
 bot local IP may be different than net/http request remoteAddr
 	but we need the bot IP to send communications to the bot
 	and we need the bot remoteAddr to know who sends _us_ what
+		actualy, remoteAddr may change! so, we require the bot send us
+		it's ID at every POST
 */
 var ogm map[int]map[int]float64
 var bot []string          // [int ID] -> "ip-addr"
 var remote map[string]int // "bot remote addr" -> int ID      TODO delete
 var clocks []int64        // [int ID] -> millisecond start time offset
-var n int = 5             // total number of bots
+var n int = 6             // total number of bots
 
 type key int
 
@@ -42,6 +44,7 @@ type regPostData struct {
 type locPostData struct {
 	ID    int     `json:"id"`
 	Start int64   `json:"start,omitempty"`
+	End   int64   `json:"end,omitempty"`
 	Left  []int64 `json:"left,omitempty"`
 	Right []int64 `json:"right,omitempty"`
 }
@@ -219,19 +222,29 @@ func main() {
 			if err != nil {
 				log.Fatal(err)
 			}
+			log.Println(string(reqBodyBytes))
 			reqBody := &locPostData{}
 			err = json.Unmarshal(reqBodyBytes, reqBody)
 			if err != nil {
 				log.Fatal(err)
 			}
 			// reqBody.id = botID
-			log.Printf("  %v\n", reqBody)
+			// log.Printf("  %v\n", reqBody)
 			loc <- reqBody
 			w.Write([]byte(`thanks!`))
 		default:
 			w.WriteHeader(http.StatusNotImplemented)
 			w.Write([]byte(http.StatusText(http.StatusNotImplemented)))
 		}
+	})
+	router.HandleFunc("/debug", func(w http.ResponseWriter, r *http.Request) {
+		reqBodyBytes, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			log.Println(err)
+		} else {
+			log.Println(string(reqBodyBytes))
+		}
+		w.Write([]byte(`thanks!`))
 	})
 	nextRequestID := func() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
@@ -272,13 +285,13 @@ func main() {
 		// TODO do shit with this data
 		fmt.Printf("%v\n", <-loc)
 		fmt.Printf("%v\n", <-loc)
-		fmt.Println(string(doMovPost(movForward, 20, 0))) // move 0 forward
+		fmt.Println(string(doMovPost(movForward, 10, 0))) // move 0 forward
 		//
 		fmt.Println(string(doLocPost(`l,1000,500`, 0)))
 		fmt.Println(string(doLocPost(`s,1000,500`, 1)))
 		fmt.Printf("%v\n", <-loc)
 		fmt.Printf("%v\n", <-loc)
-		fmt.Println(string(doMovPost(movBackward, 20, 0)))
+		fmt.Println(string(doMovPost(movBackward, 10, 0)))
 		// done localization
 		log.Println("[DATA] localization completed.")
 		// start planning and exploration

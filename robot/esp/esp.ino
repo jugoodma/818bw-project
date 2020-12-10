@@ -18,20 +18,36 @@ void setup() {
   Serial.begin(9600);
   sound_setup();
   usonic_setup();
+  // boolean sync = false;
+  // char buf[1];
+  // while(!sync){
+  //   if(Serial.available()){
+  //     Serial.readBytes(buf,1);
+  //     if(buf[0] == 's'){
+  //       Serial.write('a');
+  //       Serial.flush();
+  //       sync = true;
+  //     }
+  //   }
+  //   delay(10);
+  // }
   boolean sync = false;
   char buf[1];
-  while(!sync){
-    if(Serial.available()){
-      Serial.readBytes(buf,1);
-      if(buf[0] == 's'){
-        Serial.write('a');
-        Serial.flush();
+  Serial.println("ATTEMPTING TO SYNC WITH NANO.");
+  while (!sync) {
+    Serial.write('s');
+    delay(50);
+    if (Serial.available()) {
+      Serial.readBytes(buf, 1);
+      if (buf[0] == 's') {
         sync = true;
-      } 
+      }
     }
-    delay(10);
   }
+  Serial.println("\nSYNCED.");
   internet_setup();
+  beep(100, 110);
+  beep(100, 130);
 }
 
 void loop() {
@@ -47,6 +63,24 @@ void usonic_setup(){
   pinMode(trigPin, OUTPUT);
 }
 
+float read_ult(int samples) {
+  float tot = 0;
+  for (int i = 0; i < samples; i++) {
+    digitalWrite(trigPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+    // Reads the echoPin, returns the sound wave travel time in microseconds
+    tot += pulseIn(echoPin, HIGH);
+  }
+  return microsecondsToCentimeters(tot) / samples;
+}
+
+void beep(int ms, int hz) {
+  analogWrite(speakerPin, hz);
+  delay(ms);
+  analogWrite(speakerPin, 0);
+}
+
 void internet_setup(){
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED)
@@ -58,6 +92,7 @@ void internet_setup(){
   server.on("/", handleRoot);
   server.on("/loc", getLocData);
   server.on("/mov", getMovData);
+  server.on("/ult", getUltData);
   server.onNotFound(handleNotFound);
   server.begin();
 }
@@ -76,14 +111,21 @@ void getLocData(){
 }
 
 void getMovData(){
-  String message = "Hello there! General Kenobi.";
   String body = server.arg("plain");
-  server.send(200, "text/plain", message);
   int comma = body.indexOf(',');
   int param = body.substring(comma+1).toInt();
   char sig = body.charAt(0);
-  if(sig == 'f'||sig=='b'||sig=='r')
-    motor_sig(sig-32,param);
+  if (sig == 'f' || sig == 'b' || sig == 'r') {
+    server.send(200, "text/plain", "Hello there! General Kenobi.\n");
+    motor_sig(sig, param);
+  } else {
+    server.send(200, "text/plain", "invalid command\n");
+  }
+}
+
+void getUltData() {
+  int samples = server.arg("plain").toInt();
+  server.send(200, "text/plain", String(read_ult(samples)));
 }
 
 void listen_sig(int postTime, int delayTime){
@@ -141,22 +183,115 @@ void speaker_sig(int postTime, int delayTime){
   sendLoc(message);
 }
 
-void motor_sig(char sig, int param){
-  byte outBuf[5];
-  long duration,cm;
-  memcpy(outBuf, &sig, 1);
-  memcpy(outBuf+1, &param,2);
-  memcpy(outBuf+3, &param, 2);
-  
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  // Reads the echoPin, returns the sound wave travel time in microseconds
-  duration = pulseIn(echoPin, HIGH);
-  cm = microsecondsToCentimeters(duration);
-  Serial.write(outBuf,5);
-  Serial.flush();
+void motor_sig(char sig, int param) {
+  beep(250, 110);
+  // if rotate,  param == degrees
+  // if fwd/bak, param == travel distance
+  byte out_buf[5];
+  if (sig == 'r') {
+    memcpy(out_buf, &sig, 1);
+    memcpy(out_buf+1, &param, 2);
+    memcpy(out_buf+3, &param, 2);
+    while (Serial.availableForWrite() < 5) {;}
+    Serial.write(out_buf, 5);
+    Serial.flush();
+  } else {
+    if (sig == 'b') {
+      sig = 'f';
+      param *= -1;
+    }
+    int max_computation = 10000;
+    memcpy(out_buf, &sig, 1);
+    memcpy(out_buf+1, &max_computation, 2);
+    memcpy(out_buf+3, &max_computation, 2);
+    while (Serial.availableForWrite() < 5) {;}
+    Serial.write(out_buf, 5);
+    Serial.flush();
+    // todo, control code for rotation on nano?
+    // int param == centimeters of wanted fwd/bak travel distance
+    unsigned long start_time = millis();
+    int max_motor_time = 1;
+    float start_ult_dist = read_ult(10), curr_ult_dist, delta_distance = 0, c;
+    sendDebug(String(start_ult_dist));
+    // while within computation time
+    // and have not traveled enough distance (fwd / bak)
+    while (millis() - start_time < max_computation && delta_distance < param && sig != 'x') {
+      // compute distance to-go
+      curr_ult_dist = read_ult(3);
+      sendDebug(String(curr_ult_dist));
+      delta_distance = start_ult_dist - curr_ult_dist;
+      // decide which motor action to take
+      c = param - delta_distance;
+      if (curr_ult_dist < 10) {
+        sig = 'b'; // we're too close to a forward obstacle
+      } else if (c > 0.5) {
+        sig = 'f';
+      } else if (c < -0.5) {
+        sig = 'b';
+      } else if (sig == 'p') {
+        sig = 'x'; // stop!
+      } else {
+        sig = 'p';
+      }
+      // decide how long to keep motors on (max)
+      max_motor_time = 50; // todo -- function of acceleration and distance-to-go
+      // tell nano what to do
+      memcpy(out_buf, &sig, 1);
+      memcpy(out_buf+1, &max_motor_time, 2);
+      memcpy(out_buf+3, &max_motor_time, 2);
+      while (Serial.availableForWrite() < 5) {;}
+      Serial.write(out_buf, 5);
+      Serial.flush(); // wait until buffer is fully written
+      // repeat
+      // beep(max_motor_time, 110);
+      delay(2*max_motor_time);
+    }
+    beep(100, 110);
+    beep(200, 130);
+  }
 }
+
+//void motor_sig(char sig, int param) {
+//  // int param == centimeters of forward travel distance
+//  byte outBuf[5];
+//  float start_cm, prev_cm, curr_cm;
+//  // unsigned long start_time;
+//  memcpy(outBuf, &sig, 1);
+//  memcpy(outBuf+1, &param, 2);
+//  memcpy(outBuf+3, &param, 2);
+//  start_cm = read_ult();
+//  Serial.write(outBuf,5);
+//  Serial.flush();
+//
+//  // start_time = millis();
+//  prev_cm = start_cm;
+//  curr_cm = -1;
+//  // wait until we finish moving
+//  delay(1000);
+//  while (curr_cm > start_cm - 1 || prev_cm - curr_cm > 0.25) {
+//    prev_cm = curr_cm;
+//    curr_cm = read_ult();
+//    // duration = millis();
+//    analogWrite(speakerPin, 220);
+//    delay(100);
+//    analogWrite(speakerPin, 0);
+//    delay(500);
+//  }
+//  // mitigate error
+//  // how much distance do we still need to travel?
+//  // how far did we go? X = start_cm - curr_cm
+//  // how far to-go? Y = param - X
+//  // what next distance to send the nano? f(wanted)->actual, so  wanted / actual * (new actual) -> new wanted
+//  // param / X * Y
+//  param = param*param / (start_cm - curr_cm) - param;
+//  delay(10000);
+//  memcpy(outBuf, &sig, 1);
+//  memcpy(outBuf+1, &param, 2);
+//  memcpy(outBuf+3, &param, 2);
+//  Serial.write(outBuf,5);
+//  Serial.flush();
+//}
+
 void pingServer(){
   HTTPClient http;
   if (http.begin("http://192.168.1.186:42/reg")) {
@@ -193,18 +328,16 @@ void sendMov(String message){
   }
 }
 
+void sendDebug(String message) {
+  HTTPClient http;
+  if (http.begin("http://192.168.1.186:42/debug")){
+    int httpCode = http.POST(message);
+    http.end();
+  }
+}
+
 void test_usonic(){
-  long duration, inches, cm;
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  // Reads the echoPin, returns the sound wave travel time in microseconds
-  duration = pulseIn(echoPin, HIGH);
-  inches = microsecondsToInches(duration);
-  cm = microsecondsToCentimeters(duration);
-  Serial.print(inches);
-  Serial.print("in, ");
-  Serial.print(cm);
+  Serial.print(read_ult(3));
   Serial.print("cm");
   Serial.println();
 }
@@ -217,10 +350,10 @@ void handleNotFound(){
   server.send(404, "text/plain", ":(");
 }
 
-long microsecondsToInches(long microseconds) {
-   return microseconds / 74 / 2;
-}
+// long microsecondsToInches(long microseconds) {
+//   return microseconds / 74 / 2;
+// }
 
-long microsecondsToCentimeters(long microseconds) {
-   return microseconds / 29 / 2;
+float microsecondsToCentimeters(long microseconds) {
+  return microseconds / 29.0 / 2.0;
 }
