@@ -24,7 +24,7 @@ var ogm map[int]map[int]float64
 var bot []string          // [int ID] -> "ip-addr"
 var remote map[string]int // "bot remote addr" -> int ID      TODO delete
 var clocks []int64        // [int ID] -> millisecond start time offset
-var n int = 6             // total number of bots
+var n int = 2             // total number of bots
 
 type key int
 
