@@ -12,11 +12,7 @@
 MPU6050 mpu;
 float timeStep = 0.01;
 unsigned long s_time;
-int half = 256;
-int full = half *2; //512 integers or 1024 bytes
-int to_send = 16; 
-byte outBuf[16*sizeof(int)];
-int samples[8]; // 512
+unsigned long e_time;
 
 float x_accel_offset = 0;
 float y_accel_offset = 0;
@@ -42,27 +38,40 @@ void setup() {
   //microphones
   pinMode(MICL,INPUT);
   pinMode(MICR,INPUT);
-  mpu.begin(MPU6050_SCALE_2000DPS, MPU6050_RANGE_2G);
+//  mpu.begin(MPU6050_SCALE_2000DPS, MPU6050_RANGE_2G);
   // mpu.setThreshold(3);
-  mpu.calibrateGyro(100);
-  calibrateAccel(100);
+//  mpu.calibrateGyro(100);
+//  calibrateAccel(100);
   setupMotors();
   boolean sync = false;
   char buf[1];
-  Serial.println("ATTEMPTING TO SYNC WITH ESP.");
-  while (!sync) {
-    Serial.write('s');
-    delay(50);
-    if (Serial.available()) {
-      Serial.readBytes(buf, 1);
-      // Serial.print(" |");
-      // Serial.println(buf[0]);
-      if (buf[0] == 's') {
-        sync = true;
+  while(!sync){
+    if(Serial.availableForWrite()){
+      Serial.write('s');
+      Serial.flush();
+      delay(50);
+      if(Serial.available()){
+        Serial.readBytes(buf,1);
+        if(buf[0] == 'a'){
+          sync = true;
+        }
       }
     }
   }
-  Serial.println("\nSYNCED.");
+//  Serial.println("ATTEMPTING TO SYNC WITH ESP.");
+//  while (!sync) {
+//    Serial.write('s');
+//    delay(50);
+//    if (Serial.available()) {
+//      Serial.readBytes(buf, 1);
+//      // Serial.print(" |");
+//      // Serial.println(buf[0]);
+//      if (buf[0] == 's') {
+//        sync = true;
+//      }
+//    }
+//  }
+//  Serial.println("\nSYNCED.");
 }
 
 void setupMotors(){
@@ -78,22 +87,30 @@ void setupMotors(){
 }
 
 void locListen(int pt, int dt){
-  int ptr = 0;
+  int buf[2];
+  int times[4];
+  int count = 0;
+  boolean end = true;
+  times[0] = -1;
+  times[1] = -1;
+  times[2] = 0;
   delay(dt);
   s_time = millis();
-  while(ptr < half){// && s_time - millis() < pt){
-    samples[ptr] = analogRead(MICL);
-    samples[ptr+half] = analogRead(MICR);
-    ptr++;
-    delay(10);
+  while(millis()-s_time < pt && Serial.availableForWrite()>=4 && count < 2048){
+    buf[0] = analogRead(MICL);
+    buf[1] = analogRead(MICR);
+    Serial.write((byte *)buf, 4);
+    Serial.flush();
+    count++;
   }
-  ptr = 0;
-  while(ptr < full){
-    if(Serial.availableForWrite()>=to_send*sizeof(int)){
-      memcpy(outBuf,samples+ptr, to_send*sizeof(int));
-      Serial.write(outBuf, to_send*(sizeof(int)));
+  e_time = (int)(millis()-s_time);
+
+  times[3] = e_time;
+  while(end){
+    if(Serial.availableForWrite()>=8){
+      Serial.write((byte *)times, 8);
       Serial.flush();
-      ptr += to_send;
+      end = false;
     }
     delay(10);
   }

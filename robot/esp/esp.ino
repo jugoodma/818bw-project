@@ -14,39 +14,49 @@ ESP8266WebServer server(80);
 int ID = -1;
 unsigned long myTime;
 
+short half = 2048;
+short samples[4096];
+
 void setup() {
   Serial.begin(9600);
   sound_setup();
   usonic_setup();
-  // boolean sync = false;
-  // char buf[1];
-  // while(!sync){
-  //   if(Serial.available()){
-  //     Serial.readBytes(buf,1);
-  //     if(buf[0] == 's'){
-  //       Serial.write('a');
-  //       Serial.flush();
-  //       sync = true;
-  //     }
-  //   }
-  //   delay(10);
-  // }
   boolean sync = false;
+  boolean v = true;
   char buf[1];
-  Serial.println("ATTEMPTING TO SYNC WITH NANO.");
-  while (!sync) {
-    Serial.write('s');
-    delay(50);
-    if (Serial.available()) {
-      Serial.readBytes(buf, 1);
-      if (buf[0] == 's') {
+  int count = 0;
+  while(v){
+    if(Serial.available()){
+      Serial.readBytes(buf,1);
+      if(buf[0] == 's'){
+        Serial.write('a');
+        Serial.flush();
         sync = true;
       }
+    }else{
+      count++;
+      if(count >= 10 && sync){
+        v = false;
+      }
     }
+    delay(10);
   }
-  Serial.println("\nSYNCED.");
-  internet_setup();
+//  boolean sync = false;
+//  char buf[1];
+//  Serial.println("ATTEMPTING TO SYNC WITH NANO.");
+//  while (!sync) {
+//    Serial.write('s');
+//    delay(50);
+//    if (Serial.available()) {
+//      Serial.readBytes(buf, 1);
+//      if (buf[0] == 's') {
+//        sync = true;
+//      }
+//    }
+//  }
+//  Serial.println("\nSYNCED.");
   beep(100, 110);
+  internet_setup();
   beep(100, 130);
 }
 
@@ -94,6 +104,7 @@ void internet_setup(){
   server.on("/mov", getMovData);
   server.on("/ult", getUltData);
   server.on("/bep", getBepData);
+  server.on("/noise", getNoiseData);
   server.onNotFound(handleNotFound);
   server.begin();
 }
@@ -136,46 +147,69 @@ void getBepData() {
   server.send(200, "text/plain", "bepis\n");
 }
 
+void getNoiseData(){
+  String message = "Jane you ignorant slut.";
+  String body = server.arg("plain");
+  server.send(200, "text/plain", message);
+  int param = body.toInt();
+  noise_sig(param);
+}
+
 void listen_sig(int postTime, int delayTime){
-  byte outBuf[5];
-  int half = 256;
-  int full = half *2;
-  int to_read = 16;
-  byte inBuf[to_read*sizeof(short)];
-  short samples[full];
+  byte buf[5];
   int ptr = 0;
-  int count = 0;
-  outBuf[0] = 'L';
-  memcpy(outBuf+1, &postTime, 2);
-  memcpy(outBuf+3, &delayTime, 2);
-  Serial.write(outBuf,5);
+  short value = 0;
+  short time_buf[2];
+  boolean end = true;
+  buf[0] = 'L';
+  memcpy(buf+1, &postTime, 2);
+  memcpy(buf+3, &delayTime, 2);
+  Serial.write(buf,5);
   Serial.flush();
-  delay((postTime+ delayTime)*2);
-  while(ptr < full){
-    if (Serial.available()>=to_read*sizeof(short)) {
-      Serial.readBytes(inBuf, to_read*sizeof(short));
-      for(int j = 0; j < to_read;j++)
-        samples[j+ptr] = ((short *)inBuf)[j];
-      ptr += to_read;
-    } 
-    delay(10);
+  delay(delayTime);
+  if (Serial.available()>=4) {
+    Serial.readBytes(buf, 4);
+  }  
+  while(ptr < half & end){
+    if (Serial.available()>=4) {
+      Serial.readBytes(buf, 4);
+      value = ((short *)buf)[0];
+      if(value == -1){
+        end = false;         
+      }
+      samples[ptr] = value;
+      samples[ptr+half] = ((short *)buf)[1];
+      ptr ++;
+    }
+    delay(1);
+  }
+  while(!end){
+    if (Serial.available()>=4) {
+      Serial.readBytes((byte *)time_buf, 4);
+      end = true;
+    }
+    delay(1);
   }
   String message = "{\"start\":";
-  message += myTime;
+  message += time_buf[0];
+  message += ",\"end\":";
+  message += time_buf[1];
   message += ",\"id\":";
   message += ID;
   message += ",\"left\":[";
-  for(int i = 0; i < 255; i++){
+  for(int i = 0; i < ptr-1; i++){
     message+=samples[i];
     message+=",";
+    delay(10);
   }
-  message+=samples[255];
+  message+=samples[ptr-1];
   message += "],\"right\":[";
-  for(int i = 0; i < 255; i++){
-    message+=samples[i+256];
+  for(int i = 0; i < ptr-1; i++){
+    message+=samples[i+half];
     message+=",";
+    delay(10);
   }
-  message+=samples[511];
+  message+=samples[ptr-1+half];
   message += "]}";
   sendLoc(message);
 }
@@ -300,6 +334,15 @@ void motor_sig(char sig, int param) {
 //  Serial.write(outBuf,5);
 //  Serial.flush();
 //}
+
+void noise_sig(int param){
+  byte outBuf[5];
+  outBuf[0] = 'n';
+  memcpy(outBuf+1, &param,2);
+  memcpy(outBuf+3, &param, 2);
+  Serial.write(outBuf,5);
+  Serial.flush();
+}
 
 void pingServer(){
   HTTPClient http;
