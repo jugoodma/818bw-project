@@ -33,7 +33,7 @@ void calibrateAccel(int samples) {
 
 void setup() {
   Serial.begin(9600);
-  Serial.println("NANO STARTING.");
+//  Serial.println("NANO STARTING.");
   analogReference(INTERNAL);
   //microphones
   pinMode(MICL,INPUT);
