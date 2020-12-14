@@ -3,6 +3,9 @@
 #define echoPin 5
 #define trigPin 4
 
+// this file is intended to be loaded onto the ESP
+// no dependence on the NANO
+
 void usonic_setup(){
   pinMode(echoPin, INPUT);
   pinMode(trigPin, OUTPUT);
@@ -26,7 +29,7 @@ void setup() {
 }
 
 void loop() {
-    Serial.print(read_ult());
-    Serial.println("cm");
-    delay(100);
+  Serial.print(read_ult());
+  Serial.println("cm");
+  delay(100);
 }

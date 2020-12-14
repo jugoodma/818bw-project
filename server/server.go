@@ -13,6 +13,11 @@ import (
 	"time"
 )
 
+type point struct {
+	x int
+	y int
+}
+
 /*
 bot local IP may be different than net/http request remoteAddr
 	but we need the bot IP to send communications to the bot
@@ -22,6 +27,7 @@ bot local IP may be different than net/http request remoteAddr
 */
 var ogm map[int]map[int]float64
 var bot []string          // [int ID] -> "ip-addr"
+var pos []point           // [(x,y)] ; index == botID
 var remote map[string]int // "bot remote addr" -> int ID      TODO delete
 var clocks []int64        // [int ID] -> millisecond start time offset
 var n int = 2             // total number of bots
@@ -49,14 +55,16 @@ type locPostData struct {
 	Right []int64 `json:"right,omitempty"`
 }
 
-// movement POST return json
-//  data returned from us POSTing to the bot
-type movRetData struct {
-	ID       int    `json:"id"`
-	Gyrodata string `json:"gryodata,omitempty"`
+// movement received json
+//  data returned from bot POSTing to us
+type movPostData struct {
+	ID    int     `json:"id"`
+	Start float64 `json:"start,omitempty"`
+	End   float64 `json:"end,omitempty"`
 }
 
 var loc chan *locPostData
+var mov chan *movPostData
 
 func makeTimestamp() int64 {
 	return time.Now().UnixNano() / int64(time.Millisecond)
@@ -66,32 +74,23 @@ func makeTimestamp() int64 {
 func logging(logger *log.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// inject request id?
+			requestID := r.Header.Get("X-Request-Id")
+			if requestID == "" {
+				requestID = fmt.Sprintf("%d", time.Now().UnixNano())
+			}
+			w.Header().Set("X-Request-Id", requestID)
+			// log request
 			defer func() {
-				requestID, ok := r.Context().Value(requestIDKey).(string)
-				if !ok {
-					requestID = "unknown"
-				}
 				logger.Printf("[%v %v] <%v> %v (%v)\n", r.Method, r.URL.Path, r.RemoteAddr, r.UserAgent(), requestID)
 			}()
 			next.ServeHTTP(w, r)
 		})
 	}
 }
-func tracing(nextRequestID func() string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			requestID := r.Header.Get("X-Request-Id")
-			if requestID == "" {
-				requestID = nextRequestID()
-			}
-			ctx := context.WithValue(r.Context(), requestIDKey, requestID)
-			w.Header().Set("X-Request-Id", requestID)
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
-}
 
 func doLocPost(data string, botID int) []byte {
+	fmt.Println(data)
 	reqBody := []byte(data)
 	resp, err := http.Post("http://"+bot[botID]+"/loc", "application/text", bytes.NewBuffer(reqBody))
 	if err != nil {
@@ -127,15 +126,51 @@ func doMovPost(c movCMD, l int, botID int) []byte {
 	return body
 }
 
+// localization
+func localize() {
+	// assume num_bots >= 3
+	// assume leader == 0 -- this is the bot we localize relative to
+	// (1) localize 1 to 0
+	// TODO -> parameterize
+	var delayTime int64 = 2000
+	dDelta := 35
+	// tone := 300
+	t := makeTimestamp()
+	// post the listener first b/c they have more setup work to do
+	doLocPost(fmt.Sprintf("l,750,%v", delayTime), 0)                         // s0 (l == listen)
+	doLocPost(fmt.Sprintf("s,500,%v", delayTime-(makeTimestamp()-t)+100), 1) // s1 (s == speak)
+	// wait for (1) localization data (block)
+	// TODO do shit with this data
+	lpd1 := <-loc
+	lpd2 := <-loc
+	doMovPost(movForward, dDelta, 0) // move 0 forward
+	mpd := <-mov
+	dDeltaTrue1 := mpd.End - mpd.Start // actual distance traveled
+	time.Sleep(time.Second * 3)
+	// repeat
+	t = makeTimestamp()
+	doLocPost(fmt.Sprintf("l,750,%v", delayTime), 0)                         // s0 (l == listen)
+	doLocPost(fmt.Sprintf("s,500,%v", delayTime-(makeTimestamp()-t)+100), 1) // s1 (s == speak)
+	lpd3 := <-loc
+	lpd4 := <-loc
+	doMovPost(movBackward, dDelta, 0) // return 0 "home"
+	mpd = <-mov
+	dDeltaTrue2 := mpd.End - mpd.Start // actual distance traveled
+	// done localization
+	fmt.Printf("L1=%v;\nR1=%v;\nL1=%v;\nR1=%v;\n\nL2=%v;\nR2=%v;\nL2=%v;\nR2=%v;\n\n%v\t%v\n", lpd1.Left, lpd1.Right, lpd2.Left, lpd2.Right, lpd3.Left, lpd3.Right, lpd4.Left, lpd4.Right, dDeltaTrue1, dDeltaTrue2)
+}
+
 // main server
 func main() {
 	// OGM setup
 	log.Println("Occupancy Grid Mapping setup.")
 	ogm = make(map[int]map[int]float64)
 	bot = make([]string, 0) // num robots
+	pos = make([]point, 0)  // num robots
 	remote = make(map[string]int)
 	clocks = make([]int64, 0)
-	loc = make(chan *locPostData, 2)
+	loc = make(chan *locPostData, n)
+	mov = make(chan *movPostData, n)
 
 	// http setup
 	log.Println("Starting server.")
@@ -164,7 +199,6 @@ func main() {
 		switch r.Method {
 		case "POST":
 			reqBodyBytes, err := ioutil.ReadAll(r.Body)
-			// log.Printf("%v\n", reqBodyBytes)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -220,17 +254,35 @@ func main() {
 		case "POST":
 			reqBodyBytes, err := ioutil.ReadAll(r.Body)
 			if err != nil {
-				log.Fatal(err)
+				fmt.Println(err)
 			}
 			log.Println(string(reqBodyBytes))
 			reqBody := &locPostData{}
 			err = json.Unmarshal(reqBodyBytes, reqBody)
 			if err != nil {
-				log.Fatal(err)
+				fmt.Println(err)
 			}
-			// reqBody.id = botID
-			// log.Printf("  %v\n", reqBody)
 			loc <- reqBody
+			w.Write([]byte(`thanks!`))
+		default:
+			w.WriteHeader(http.StatusNotImplemented)
+			w.Write([]byte(http.StatusText(http.StatusNotImplemented)))
+		}
+	})
+	router.HandleFunc("/mov", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "POST":
+			reqBodyBytes, err := ioutil.ReadAll(r.Body)
+			if err != nil {
+				fmt.Println(err)
+			}
+			log.Println(string(reqBodyBytes))
+			reqBody := &movPostData{}
+			err = json.Unmarshal(reqBodyBytes, reqBody)
+			if err != nil {
+				fmt.Println(err)
+			}
+			mov <- reqBody
 			w.Write([]byte(`thanks!`))
 		default:
 			w.WriteHeader(http.StatusNotImplemented)
@@ -246,12 +298,9 @@ func main() {
 		}
 		w.Write([]byte(`thanks!`))
 	})
-	nextRequestID := func() string {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
-	}
 	server := &http.Server{
 		Addr:    ":" + strconv.Itoa(port),
-		Handler: tracing(nextRequestID)(logging(logger)(router)),
+		Handler: logging(logger)(router),
 	}
 
 	// spawn http server thread
@@ -260,7 +309,7 @@ func main() {
 		log.Println("server listening...")
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
 			// unexpected error. port in use?
-			log.Fatalf("ListenAndServe(): %v", err)
+			log.Fatalf("ListenAndServe(): %v\n", err)
 		}
 	}()
 
@@ -273,29 +322,13 @@ func main() {
 				break
 			}
 		}
-		time.Sleep(time.Second * 2)
+		time.Sleep(time.Second * 3)
 		log.Printf("[DATA] %v bot(s) have registered -- starting localization procedure\n", len(bot))
-		// assume num_bots >= 3
-		// assume leader == 0 -- this is the bot we localize relative to
-		// (1) localize 1 to 0
-		// TODO -> parameterize 1000 and 500
-		fmt.Println(string(doLocPost(`l,1000,500`, 0))) // s0 (l == listen)
-		fmt.Println(string(doLocPost(`s,1000,500`, 1))) // s1 (s == speak)
-		// wait for (1) localization data (block)
-		// TODO do shit with this data
-		fmt.Printf("%v\n", <-loc)
-		fmt.Printf("%v\n", <-loc)
-		fmt.Println(string(doMovPost(movForward, 10, 0))) // move 0 forward
-		//
-		fmt.Println(string(doLocPost(`l,1000,500`, 0)))
-		fmt.Println(string(doLocPost(`s,1000,500`, 1)))
-		fmt.Printf("%v\n", <-loc)
-		fmt.Printf("%v\n", <-loc)
-		fmt.Println(string(doMovPost(movBackward, 10, 0)))
-		// done localization
+		localize()
 		log.Println("[DATA] localization completed.")
 		// start planning and exploration
 
+		// just end for now
 		cancel()
 	}()
 
