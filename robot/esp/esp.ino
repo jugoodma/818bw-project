@@ -18,8 +18,8 @@ String server_addr = "http://192.168.1.186:42";
 ESP8266WebServer server(80);
 int ID = -1;
 unsigned long my_time;
-unsigned short samples[2 * MAX_LR_MIC_SAMPLES];
-//unsigned byte samples[2*2*MAX_LR_MIC_SAMPLES];
+//unsigned short samples[2 * MAX_LR_MIC_SAMPLES];
+byte samples[2*2*MAX_LR_MIC_SAMPLES] = {0};
 
 // main stuff
 
@@ -258,107 +258,76 @@ void get_bep_data() {
 // this is "little endian" ness
 
 void listen_sig(unsigned short post_time, unsigned short delay_time) {
+  unsigned long setup_start_time = millis();
   byte buf[5] = {0};
   int ptr = 0;
-  int count = 0;
-  boolean flag = false;
+  boolean flag = false, flop = false;
   unsigned long total_time;
+  for (int i = 0; i < 2*2*MAX_LR_MIC_SAMPLES; i++) {
+    samples[i] = 0;
+  }
   buf[0] = 'L';
   memcpy(buf+1, (byte *) &post_time,  sizeof(short));
   memcpy(buf+3, (byte *) &delay_time, sizeof(short));
   Serial.write(buf, 5);
 //  Serial.flush();
-  ((unsigned long *) buf)[0] = 0xffffffff;
-  while (((unsigned short *) buf)[0] | ((unsigned short *) buf)[1]) { // TODO -- timeout error?
+  ((unsigned long *) buf)[0] = 0x00000000;
+  while (Serial.available() > 0) {
+    buf[0] = Serial.read();
+    if ((buf[0] & buf[1]) == 0xff) break;
+    buf[1] = buf[0];
     delay(1);
-    if (Serial.available() >= 4) {
-      Serial.readBytes(buf, 4);
-    }
   }
-  server.send(200, "text/plain", String(millis())); // critical for timing
+  server.send(200, "text/plain", String(setup_start_time)+","+String(millis())); // critical for timing
 //  delay(delay_time);
-  unsigned long st = millis();
-//  while (ptr < 2*2*MAX_LR_MIC_SAMPLES && !flag && millis() - st < 2000) {
-//    while (Serial.available() > 0 && millis() - st < 2000) {
-//      samples[ptr] = Serial.read();
-//      flag = samples[ptr] & samples[ptr+MAX_LR_MIC_SAMPLES] == 0xffff;
-//      if (flag) break;
-//      if (ptr >= MAX_LR_MIC_SAMPLES) break;
-//      delay(1);
-//    }
-//    delay(1);
-//  }
-  while (ptr < MAX_LR_MIC_SAMPLES && !flag && millis() - st < 2000) {
-    while (Serial.available() > 0 && millis() - st < 2000) {
-      // process incoming byte
-      switch (count) {
-        case 0:
-          ((byte *)(samples+ptr))[0] = Serial.read();
-          count++;
-          break;
-        case 1:
-          ((byte *)(samples+ptr))[1] = Serial.read();
-          count++;
-          break;
-        case 2:
-          ((byte *)(samples+ptr+MAX_LR_MIC_SAMPLES))[0] = Serial.read();
-          count++;
-          break;
-        case 3:
-          ((byte *)(samples+ptr+MAX_LR_MIC_SAMPLES))[1] = Serial.read();
-          count = 0;
-          ptr++;
-          break;
-        default: // should not happen
-          count = 0;
-          ptr++;
-          break;
+  unsigned long true_start = 0;
+  while (ptr < 2*2*MAX_LR_MIC_SAMPLES && !flag) {
+    while (Serial.available() > 0) {
+      samples[ptr] = Serial.read();
+      if (flop) {
+        flag = ptr > 3 && ((samples[ptr-3] & samples[ptr-2] & samples[ptr-1] & samples[ptr]) == 0xff);
+        if (flag) break;
+        ptr++;
+        if (ptr >= 2*2*MAX_LR_MIC_SAMPLES) break;
+      } else {
+        flop = (samples[ptr] == 0xfe);
+        if (flop) true_start = millis();
       }
-      flag = samples[ptr] & samples[ptr+MAX_LR_MIC_SAMPLES] == 0xffff;
-      if (flag) break;
-      if (ptr >= MAX_LR_MIC_SAMPLES) break;
-//      delay(1);
+//      delay(1); // we can't have this here if baud is too high
     }
-//    if (Serial.available() >= 4) {
-//      Serial.readBytes(buf, 4);
-//      samples[ptr] = ((unsigned short *) buf)[0];
-//      samples[ptr+MAX_LR_MIC_SAMPLES] = ((unsigned short *) buf)[1];
-//      flag = samples[ptr] & samples[ptr+MAX_LR_MIC_SAMPLES] == 0xffff; // we done?
-//      ptr++;
-//    }
-//    delay(1);
+//    delay(1); // we can't have this here if baud is too high
   }
-  send_debug(String(ptr));
-//  Serial.readBytes((byte *) &total_time, sizeof(long));
-  String message = "{\"start\":0,\"end\":";
+  Serial.readBytes((byte *) &total_time, sizeof(long));
+  String message = "{\"start\":";
+  message += true_start;
+  message += ",\"total\":";
   message += total_time;
   message += ",\"id\":";
   message += ID;
-  message += ",\"left\":[";
-  for (int i = 0; i < ptr-1; i++) {
-    message += samples[i];
+  message += ",\"data\":\"";
+  for (int i = 0; i < ptr-4; i += 2) {
+    message += String(((unsigned short *)(samples+i))[0], HEX);
     message += ",";
     delay(1);
   }
-  message += samples[ptr-1];
-  message += "],\"right\":[";
-  for (int i = 0; i < ptr-1; i++) {
-    message += samples[i+MAX_LR_MIC_SAMPLES];
-    message += ",";
-    delay(1);
-  }
-  message += samples[ptr-1+MAX_LR_MIC_SAMPLES];
-  message += "]}";
+//  message += samples[ptr-4];
+  message.setCharAt(message.length()-1, '\"'); // replace comma
+  message += "}";
+//  ((unsigned long *) (samples+ptr-3))[0] = 0; // reset stop
+//  ((unsigned short *) (samples+ptr-3))[1] = 0;
   send_loc(message);
 }
 
 void speaker_sig(unsigned short post_time, unsigned short delay_time) {
   server.send(200, "text/plain", String(millis())); // critical for timing
   delay(delay_time);
+  unsigned long true_start = millis();
   beep(post_time, 300);
   delay(post_time);
   String message = "{\"id\":";
   message += ID;
+  message += ",\"start\":";
+  message += true_start;
   message += "}";
   send_loc(message);
 }
@@ -446,11 +415,11 @@ void motor_sig(char sig, short param) {
       Serial.flush();
     }
     ((unsigned long *) out_buf)[0] = 0xffffffff;
-    while (((unsigned short *) out_buf)[0] | ((unsigned short *) out_buf)[1]) { // TODO -- timeout error?
+    while (Serial.available() > 0) {
+      out_buf[0] = out_buf[0] & Serial.read();
+      if (out_buf[0] | out_buf[1] == 0) break;
+      out_buf[1] = out_buf[0];
       delay(1);
-      if (Serial.available() >= 4) {
-        Serial.readBytes(out_buf, 4);
-      }
     }
     delay(250);
     // tell server what happened

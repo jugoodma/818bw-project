@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -48,11 +49,43 @@ type regPostData struct {
 // localization received json
 //  data returned from bot POSTing to us
 type locPostData struct {
-	ID    int     `json:"id"`
-	Start int64   `json:"start,omitempty"`
-	End   int64   `json:"end,omitempty"`
-	Left  []int64 `json:"left,omitempty"`
-	Right []int64 `json:"right,omitempty"`
+	ID      int    `json:"id"`
+	Start   int64  `json:"start,omitempty"`
+	Total   int64  `json:"total,omitempty"`
+	Data    string `json:"data,omitempty"`
+	left    []int64
+	right   []int64
+	sOffset int64 // index offset at which the speaker starts
+}
+
+func (lpd *locPostData) remapSamples() {
+	// Data == []byte == [b1, b2, b3, b4, ....]
+	//  -> add b2b1 to Left
+	//  -> add b4b3 to Right
+	// TODO -- handle len(lpd.Data) % 4 != 0
+	// for i := 0; i < len(lpd.Data); i += 4 {
+	// 	if i+3 >= len(lpd.Data) {
+	// 		fmt.Println(" DATA UNPACKING ERROR.")
+	// 		break
+	// 	}
+	// 	lpd.left = append(lpd.left, int64(lpd.Data[i+1])<<8|int64(lpd.Data[i]))
+	// 	lpd.right = append(lpd.right, int64(lpd.Data[i+3])<<8|int64(lpd.Data[i+2]))
+	// }
+	if lpd.Data == "" || len(lpd.left) > 0 || len(lpd.right) > 0 {
+		lpd.Data = ""
+		return
+	}
+	for i, v := range strings.Split(lpd.Data, ",") {
+		value, err := strconv.ParseInt(v, 16, 64)
+		if err != nil {
+			fmt.Printf("Conversion failed: %s\n", err)
+		}
+		if i%2 == 0 {
+			lpd.left = append(lpd.left, value)
+		} else {
+			lpd.right = append(lpd.right, value)
+		}
+	}
 }
 
 // movement received json
@@ -90,7 +123,7 @@ func logging(logger *log.Logger) func(http.Handler) http.Handler {
 }
 
 func doLocPost(data string, botID int) []byte {
-	fmt.Println(data)
+	// fmt.Println(data)
 	reqBody := []byte(data)
 	resp, err := http.Post("http://"+bot[botID]+"/loc", "application/text", bytes.NewBuffer(reqBody))
 	if err != nil {
@@ -132,13 +165,20 @@ func localize() {
 	// assume leader == 0 -- this is the bot we localize relative to
 	// (1) localize 1 to 0
 	// TODO -> parameterize
-	var delayTime int64 = 2000
-	dDelta := 35
+	var delayTime int64 = 500
+	dDelta := 100
 	// tone := 300
 	t := makeTimestamp()
 	// post the listener first b/c they have more setup work to do
-	doLocPost(fmt.Sprintf("l,750,%v", delayTime), 0)                         // s0 (l == listen)
-	doLocPost(fmt.Sprintf("s,500,%v", delayTime-(makeTimestamp()-t)+100), 1) // s1 (s == speak)
+	s := strings.Split(string(doLocPost(fmt.Sprintf("l,500,%v", delayTime), 0)), ",") // s0 (l == listen)
+	t1 := makeTimestamp()
+	u1, _ := strconv.ParseInt(s[1], 10, 64)
+	u0, _ := strconv.ParseInt(s[0], 10, 64)
+	u := u1 - u0
+	t1 = (t1 - t - u) / 2
+	doLocPost(fmt.Sprintf("s,250,%v", delayTime-(makeTimestamp()-t)), 1) // s1 (s == speak) // -((makeTimestamp()-t)+u-t1)
+	// doLocPost("l,500,500", 0)
+	// doLocPost("s,250,500", 1)
 	// wait for (1) localization data (block)
 	// TODO do shit with this data
 	lpd1 := <-loc
@@ -146,18 +186,56 @@ func localize() {
 	doMovPost(movForward, dDelta, 0) // move 0 forward
 	mpd := <-mov
 	dDeltaTrue1 := mpd.End - mpd.Start // actual distance traveled
-	time.Sleep(time.Second * 3)
+	time.Sleep(time.Second * 2)
 	// repeat
 	t = makeTimestamp()
-	doLocPost(fmt.Sprintf("l,750,%v", delayTime), 0)                         // s0 (l == listen)
-	doLocPost(fmt.Sprintf("s,500,%v", delayTime-(makeTimestamp()-t)+100), 1) // s1 (s == speak)
+	s = strings.Split(string(doLocPost(fmt.Sprintf("l,500,%v", delayTime), 0)), ",") // s0 (l == listen)
+	t2 := makeTimestamp()
+	u1, _ = strconv.ParseInt(s[1], 10, 64)
+	u0, _ = strconv.ParseInt(s[0], 10, 64)
+	u = u1 - u0
+	t2 = (t2 - t - u) / 2
+	doLocPost(fmt.Sprintf("s,250,%v", delayTime-(makeTimestamp()-t)), 1) // s1 (s == speak) // -((makeTimestamp()-t)+u-t2)
+	// doLocPost("l,500,500", 0)
+	// doLocPost("s,250,500", 1)
 	lpd3 := <-loc
 	lpd4 := <-loc
 	doMovPost(movBackward, dDelta, 0) // return 0 "home"
 	mpd = <-mov
 	dDeltaTrue2 := mpd.End - mpd.Start // actual distance traveled
 	// done localization
-	fmt.Printf("L1=%v;\nR1=%v;\nL1=%v;\nR1=%v;\n\nL2=%v;\nR2=%v;\nL2=%v;\nR2=%v;\n\n%v\t%v\n", lpd1.Left, lpd1.Right, lpd2.Left, lpd2.Right, lpd3.Left, lpd3.Right, lpd4.Left, lpd4.Right, dDeltaTrue1, dDeltaTrue2)
+	lpd1.remapSamples()
+	lpd2.remapSamples()
+	lpd3.remapSamples()
+	lpd4.remapSamples()
+	fmt.Printf("L1=%v;\nR1=%v;\nL1=%v;\nR1=%v;\n\nL2=%v;\nR2=%v;\nL2=%v;\nR2=%v;\n\n%v\t%v\n", lpd1.left, lpd1.right, lpd2.left, lpd2.right, lpd3.left, lpd3.right, lpd4.left, lpd4.right, dDeltaTrue1, dDeltaTrue2)
+	// calculate offsets
+	// server true start time:
+	//  STs = lpdSPEAKER.Start + clocks[1]
+	//  STm = lpdLISTENR.Start + clocks[0]
+	// idx = (STs - STm)*(len(lpdi.left)/500) (average with right?)
+	// lpdLISTENR.sOffset = idx
+	// ((t1+t2)/2)
+	if lpd1.Data == "" {
+		// lpd2 was the listener post
+		fmt.Println(lpd2.Start)
+		lpd2.sOffset = ((lpd1.Start + clocks[1]) - (lpd2.Start + clocks[0]) - ((t1 + t2) / 2)) * (int64(len(lpd2.left)) / lpd2.Total)
+	} else {
+		// lpd1 was the listener post
+		fmt.Println(lpd1.Start)
+		lpd1.sOffset = ((lpd2.Start + clocks[1]) - (lpd1.Start + clocks[0]) - ((t1 + t2) / 2)) * (int64(len(lpd1.left)) / lpd1.Total)
+	}
+	if lpd3.Data == "" {
+		// lpd4 was the listener post
+		fmt.Println(lpd4.Start)
+		lpd4.sOffset = ((lpd3.Start + clocks[1]) - (lpd4.Start + clocks[0]) - ((t1 + t2) / 2)) * (int64(len(lpd4.left)) / lpd4.Total)
+	} else {
+		// lpd3 was the listener post
+		fmt.Println(lpd3.Start)
+		lpd3.sOffset = ((lpd4.Start + clocks[1]) - (lpd3.Start + clocks[0]) - ((t1 + t2) / 2)) * (int64(len(lpd3.left)) / lpd3.Total)
+	}
+	fmt.Println(clocks)
+	fmt.Printf("speaker index starts:\n %v\t%v\n %v\t%v\n", lpd1.sOffset, lpd2.sOffset, lpd3.sOffset, lpd4.sOffset)
 }
 
 // main server
@@ -195,6 +273,7 @@ func main() {
 		cancel()
 	})
 	router.HandleFunc("/reg", func(w http.ResponseWriter, r *http.Request) {
+		t := makeTimestamp()
 		log.Println("Someone wants to register...")
 		switch r.Method {
 		case "POST":
@@ -223,7 +302,7 @@ func main() {
 				log.Printf("  %v -> %v\n", newID, newIP)
 				bot = append(bot, newIP)
 				remote[r.RemoteAddr] = newID
-				clocks = append(clocks, makeTimestamp()-reqBody.Clock) // move calculation up?
+				clocks = append(clocks, t-reqBody.Clock) // move calculation up?
 			}
 
 			w.Write([]byte(strconv.Itoa(newID)))
@@ -256,12 +335,15 @@ func main() {
 			if err != nil {
 				fmt.Println(err)
 			}
-			log.Println(string(reqBodyBytes))
+			// log.Println(string(reqBodyBytes))
 			reqBody := &locPostData{}
 			err = json.Unmarshal(reqBodyBytes, reqBody)
 			if err != nil {
 				fmt.Println(err)
 			}
+			// reqBody.remapSamples()
+			// fmt.Println(reqBody.left)
+			// fmt.Println(reqBody.right)
 			loc <- reqBody
 			w.Write([]byte(`thanks!`))
 		default:

@@ -151,11 +151,13 @@ boolean sync_board(int max_ms) {
 
 void loc_listen(unsigned short listen_time, unsigned short delay_time) {
   unsigned long start_time, total_time;
-  unsigned short buf[2] = {0};
+  unsigned short buf[2] = {0xffff};
   int count = 0;
-  Serial.write((byte *) buf, 2*sizeof(short)); // ack
+  Serial.write((byte *) buf, sizeof(short)); // ack
   delay(delay_time); // what if delay is not long enough for the write to async flush?
   start_time = millis();
+  ((byte *) buf)[0] = 0xfe;
+  Serial.write((byte *) buf, 1);
   while (millis() - start_time < listen_time && count < MAX_LR_MIC_SAMPLES) {
     if (Serial.availableForWrite() >= 2*sizeof(short)) {
       buf[0] = (unsigned short) analogRead(MICL);
@@ -178,7 +180,7 @@ void loc_listen(unsigned short listen_time, unsigned short delay_time) {
   buf[0] = 0xffff;
   buf[1] = 0xffff;
   Serial.write((byte *) buf, 2*sizeof(short)); // indicate we're done
-  // need flush?
+  Serial.flush();
   Serial.write((byte *) &total_time, sizeof(long));
   Serial.flush();
 }
