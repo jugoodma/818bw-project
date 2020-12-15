@@ -1,5 +1,4 @@
 #include <Wire.h>
-#include <MPU6050.h>
 
 #define leftA  12
 #define leftB  11
@@ -9,22 +8,31 @@
 #define MICL A1
 #define MICR A2
 
+#define MPU_ADDR 0x68
+#define rot_err 5
+
 #define MAX_LR_MIC_SAMPLES 2048
 
 // global variables
 
-MPU6050 mpu;
-// float x_accel_offset = 0;
-// float y_accel_offset = 0;
+long z_cal = 0;
+long angle = 0;
+long gyroZ = 0;
+long old_Z = 0;
+long timePast = 0;
+long timePresent = 0;
 
 // main stuff
 
 void setup() {
   delay(1000);
   Serial.begin(115200); // 38400
+  Wire.begin();
   analogReference(INTERNAL); // can take out?
   // After changing the analog reference, the first few readings from analogRead() may not be accurate.
   motor_setup();
+  mpu_setup();
+  callibrateGyroValues();
   mic_setup(128);
   // accel_setup();
   sync_board(10000);
@@ -109,26 +117,18 @@ void motor_setup() {
   motors_off();
 }
 
-// void calibrate_accel(int samples) {
-//   Vector normAccel;
-//   x_accel_offset = 0;
-//   y_accel_offset = 0;
-//   for (int i = 0; i < samples; i++) {
-// 	  normAccel = mpu.readNormalizeAccel();
-//     x_accel_offset += normAccel.XAxis;
-//     y_accel_offset += normAccel.YAxis;
-//   	delay(5);
-//   }
-//   x_accel_offset /= samples;
-//   y_accel_offset /= samples;
-// }
+void mpu_setup(){
+  Wire.beginTransmission(0b1101000);          // Start the communication by using address of MPU
+  Wire.write(0x6B);                           // Access the power management register
+  Wire.write(0b00000000);                     // Set sleep = 0
+  Wire.endTransmission();                     // End the communication
 
-// void accel_setup() {
-//   mpu.begin(MPU6050_SCALE_2000DPS, MPU6050_RANGE_2G);
-//   // mpu.setThreshold(3);
-//   mpu.calibrateGyro(100);
-//   calibrate_accel(100);
-// }
+  // configure gyro
+  Wire.beginTransmission(0b1101000);
+  Wire.write(0x1B);                           // Access the gyro configuration register
+  Wire.write(0b00000000);
+  Wire.endTransmission();
+}
 
 boolean sync_board(int max_ms) {
   unsigned long start_time = millis();
@@ -217,24 +217,78 @@ void move_straight(unsigned short max_time) {
 }
 
 // TODO!
-void move_rotate(unsigned short deg){
-  float time_step = 0.01;
-  Vector norm = mpu.readNormalizeGyro();
-  float yaws = norm.ZAxis * time_step;
-  float yawe = yaws;
-  unsigned long start_t = millis();
-  if (deg > 0) {
-    motors_rig();
-  } else {
-    deg = -deg;
-    motors_lef();
+void callibrateGyroValues() {
+  for (int i=0; i<5000; i++) {
+    getGyroValues();
+    z_cal = z_cal + gyroZ;
   }
-//  while(yawe - yaws < deg*1.58){
-  for (int i = 0; i < (int) (deg*3.5); i++) {
-    norm = mpu.readNormalizeGyro();
-    yawe = yawe + abs(norm.ZAxis * time_step);
-    delay(1);
+  z_cal = z_cal/5000;
+}
+
+void getGyroValues() {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x47);
+  Wire.endTransmission();
+  Wire.requestFrom(MPU_ADDR,2);
+  while(Wire.available() < 2);    
+  gyroZ = Wire.read()<<8|Wire.read();
+}
+
+long updateGyro(){
+  old_Z = gyroZ;
+  timePast = timePresent;
+  timePresent = millis();
+  getGyroValues();
+  angle = angle + ((timePresent - timePast)*(gyroZ + old_Z - 2*z_cal)) * 0.00000382;
+  delay(10);
+  return angle;
+}
+
+void correct_turn(int degree){
+  int count = 5;
+    //idea: while the overshot degree is over the threashold
+  // go the opposite direction and get a new overshot.
+  while(abs(degree) > rot_err && count >=0){
+    long lal = updateGyro();
+    if(degree > 0){
+      turn_Right();
+      while(abs(lal-updateGyro())<degree);
+      motors_off();
+      degree = -(abs(lal-updateGyro())-degree);
+      count--;
+    }else{
+      turn_Left();
+      while(abs(lal-updateGyro())<-degree);
+      motors_off();
+      degree = abs(lal-updateGyro())+degree;
+      count--;
+    }
   }
+}
+
+void rotate_right(int degree){
+  long lal = updateGyro();
+  motors_rig();
+  while(abs(lal-updateGyro())<degree);
   motors_off();
-  // Serial.println(yawe);
+  //this will always be an overshoot so negative tells correct if
+  //the overshoot is left or right
+  correct_turn(-(abs(lal-updateGyro())-degree));
+}
+
+void rotate_left(int degree){
+  long lal = updateGyro();
+  motors_lef();
+  while(abs(lal-updateGyro())<degree);
+  motors_off();
+  correct_turn(abs(lal-updateGyro())-degree);
+}
+
+void move_rotate(unsigned short deg){
+  timePresent = millis();
+  if(deg > 0){
+    rotate_right(deg);
+  }else{
+    rotate_left(-deg);
+  }
 }
