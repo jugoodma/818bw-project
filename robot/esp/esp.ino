@@ -9,6 +9,7 @@
 #define speakerPin 2
 
 #define MAX_LR_MIC_SAMPLES 2048
+#define LOCALIZATION_FREQ 300
 
 // global variables
 
@@ -322,7 +323,7 @@ void speaker_sig(unsigned short post_time, unsigned short delay_time) {
   server.send(200, "text/plain", String(millis())); // critical for timing
   delay(delay_time);
   unsigned long true_start = millis();
-  beep(post_time, 300);
+  beep(post_time, LOCALIZATION_FREQ);
   delay(post_time);
   String message = "{\"id\":";
   message += ID;
@@ -367,7 +368,7 @@ void motor_sig(char sig, short param) {
     // and have not traveled enough distance (fwd / bak)
     while (millis() - start_time < max_computation && flag && sig != 'x') {
       // compute distance to-go
-      curr_ult_dist = read_ult(3);
+      curr_ult_dist = read_ult(5);
       delta_distance = start_ult_dist - curr_ult_dist;
       // decide which motor action to take
       c = param - delta_distance;
