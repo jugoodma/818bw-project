@@ -371,12 +371,13 @@ func localize(numBots int) {
 	// assume leader == 0 -- this is the bot we localize everyone relative to
 	// LOCALIZE BOT i TO BOT 0
 	var delayTime int64 = 500
+	pos = nil
 	// dDelta := 100
 	for i := 0; i < n; i++ {
 		pos = append(pos, point{0, 0})
 	}
 	// main loop
-	for i := 1; i < n; i++ {
+	for i := 1; i < numBots; i++ {
 		//
 		// (1) COLLECT AUDIO SAMPLES
 		//
@@ -388,11 +389,12 @@ func localize(numBots int) {
 		// wait
 		mpd0 := <-mov
 		// update 0's position (assume no drift) TODO
-		time.Sleep(time.Second * 1) // small pause
+		time.Sleep(time.Second * 5)
+		// time.Sleep(time.Second * 1) // small pause
 		// bot i speaks to listener 0
 		spd1, lpd1, _ := listenAndSpeak(delayTime, i) // wait
 		// listener 0 moves back
-		doMovPost(movBackward, dDelta, 0)
+		doMovPost(movBackward, dDelta, 0) // TODO -- depend on mpd0
 		mpd1 := <-mov
 		//
 		// (2) CROSS-CORRELATION WITH TONE
@@ -419,9 +421,11 @@ func localize(numBots int) {
 		pos[0].y += (mpd0.Start - mpd0.End) + (mpd1.Start - mpd1.End)
 		// fmt.Println(clocks)
 		// fmt.Printf("speaker index starts:\n %v\t%v\n", lpd0.sOffset, lpd1.sOffset)
-		fmt.Printf("localized %v to leader\n%v\n", i, pos)
+		fmt.Printf("attempted to localize %v to leader\n positions: %v\n", i, pos)
 	}
 }
+
+// *** MAIN EXPLORATION PROCEDURE ***
 
 func explore(expTime float64) {
 	start := time.Now()

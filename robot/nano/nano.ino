@@ -154,7 +154,7 @@ boolean sync_board(int max_ms) {
 
 void loc_listen(unsigned short listen_time, unsigned short delay_time) {
   unsigned long start_time, total_time;
-  unsigned short buf[2] = {0xffff};
+  unsigned short buf[2] = {0xf7f7};
   int count = 0;
   Serial.write((byte *) buf, sizeof(short)); // ack
   delay(delay_time); // what if delay is not long enough for the write to async flush?

@@ -275,12 +275,11 @@ void listen_sig(unsigned short post_time, unsigned short delay_time) {
   memcpy(buf+1, (byte *) &post_time,  sizeof(short));
   memcpy(buf+3, (byte *) &delay_time, sizeof(short));
   Serial.write(buf, 5);
-//  Serial.flush();
+  Serial.flush();
   ((unsigned long *) buf)[0] = 0x00000000;
-  while (Serial.available() > 0) {
-    buf[0] = Serial.read();
-    if ((buf[0] & buf[1]) == 0xff) break;
+  while ((buf[0] ^ 0xf7) && (buf[1] ^ 0xf7)) {
     buf[1] = buf[0];
+    buf[0] = Serial.read();
     delay(1);
   }
   server.send(200, "text/plain", String(setup_start_time)+","+String(millis())); // critical for timing
@@ -290,7 +289,11 @@ void listen_sig(unsigned short post_time, unsigned short delay_time) {
     while (Serial.available() > 0) {
       samples[ptr] = Serial.read();
       if (flop) {
-        flag = ptr > 3 && ((samples[ptr-3] ^ samples[ptr-2] ^ samples[ptr-1] ^ samples[ptr]) == 0xff);
+        flag = ptr > 3 && !(
+          (samples[ptr-3] ^ 0xff) ||
+          (samples[ptr-2] ^ 0xff) ||
+          (samples[ptr-1] ^ 0xff) ||
+          (samples[ptr]   ^ 0xff));
         if (flag) break;
         ptr++;
         if (ptr >= 2*2*MAX_LR_MIC_SAMPLES) break;
@@ -347,16 +350,11 @@ void motor_sig(char sig, short param) {
     Serial.flush();
     // wait for finish signal
     ((unsigned long *) out_buf)[0] = 0x00000000;
-    while ((out_buf[0] ^ out_buf[1]) != 0xf7) {
+    while ((out_buf[0] ^ 0xf7) && (out_buf[1] ^ 0xf7)) {
       out_buf[1] = out_buf[0];
       out_buf[0] = Serial.read();
       delay(1);
     }
-//    byte tmp[4] = {0};
-//    for (int i = 0; i < 4; i++) {
-//      tmp[i] = Serial.read();
-////      send_debug(String(tmp[i], HEX));
-//    }
     float ang = 0;
     Serial.readBytes((byte *) &ang, sizeof(float));
 //    delay(250);
