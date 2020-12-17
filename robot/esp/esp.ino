@@ -363,7 +363,7 @@ void motor_sig(char sig, short param) {
     message += ID;
     message += ",\"rot\":";
     message += ang;
-    message += "}";
+    message += ",\"mov\":\"r\"}";
     send_mov(message);
   } else {
     if (sig == 'b') {
@@ -452,8 +452,7 @@ void motor_sig(char sig, short param) {
     message += start_ult_dist;
     message += ",\"end\":";
     message += read_ult(10);
-    message += "}";
+    message += ",\"mov\":\"m\"}";
     send_mov(message);
   }
 }
-

@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"math/cmplx"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -20,9 +21,15 @@ import (
 	"github.com/mjibson/go-dsp/fft"
 )
 
-type point struct {
+type pose struct {
 	x float64
 	y float64
+	r float64
+}
+
+type cell struct {
+	x int
+	y int
 }
 
 /*
@@ -32,12 +39,15 @@ bot local IP may be different than net/http request remoteAddr
 		actualy, remoteAddr may change! so, we require the bot send us
 		it's ID at every POST
 */
-var ogm map[int]map[int]float64
-var bot []string          // [int ID] -> "ip-addr"
-var pos []point           // [(x,y)] ; index == botID
-var remote map[string]int // "bot remote addr" -> int ID      TODO delete
-var clocks []int64        // [int ID] -> millisecond start time offset
-var n int = 2             // total number of bots
+var (
+	ogm       map[cell]float64
+	bot       []string           // [int ID] -> "ip-addr"
+	pos       []pose             // [(x,y,r)] ; index == botID
+	remote    map[string]int     // "bot remote addr" -> int ID      TODO delete
+	clocks    []int64            // [int ID] -> millisecond start time offset
+	n         int            = 2 // total number of bots
+	localized bool           = false
+)
 
 const (
 	tone      int     = 300  // same as on ESP board
@@ -130,6 +140,7 @@ type movPostData struct {
 	Start float64 `json:"start,omitempty"`
 	End   float64 `json:"end,omitempty"`
 	Rot   float64 `json:"rot,omitempty"`
+	Mov   string  `json:"mov"`
 }
 
 // NOTING HERE -- rotation: + is left, - is right
@@ -195,6 +206,22 @@ func doMovPost(c movCMD, l int, botID int) []byte {
 		fmt.Printf(" doMovPost body-read error -- %v\n", err)
 	}
 	return body
+}
+
+func doUltPost(botID int) float64 {
+	reqBody := []byte("5")
+	resp, err := http.Post("http://"+bot[botID]+"/ult", "application/text", bytes.NewBuffer(reqBody))
+	if err != nil {
+		fmt.Printf(" doUltPost response error -- %v\n", err)
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf(" doUltPost body-read error -- %v\n", err)
+	}
+	f, err := strconv.ParseFloat(string(body), 64)
+	// TODO handle error
+	return f
 }
 
 // *** MAIN LOCALIZATION PROCEDURE ***
@@ -325,11 +352,11 @@ func euclDist(x0, y0, x1, y1 float64) float64 {
 	return math.Sqrt(math.Pow(x1-x0, 2) + math.Pow(y1-y0, 2))
 }
 
-func midpoint(x0, y0, x1, y1 float64) point {
-	return point{x: (x0 + x1) / 2, y: (y0 + y1) / 2}
+func midpoint(x0, y0, x1, y1 float64) pose {
+	return pose{x: (x0 + x1) / 2, y: (y0 + y1) / 2, r: 0}
 }
 
-func triangulate(L0, R0, L1, R1, x0, y0, x1, y1 float64) point {
+func quadlaterate(L0, R0, L1, R1, x0, y0, x1, y1 float64) pose {
 	fmt.Println(L0, R0, L1, R1, x0, y0, x1, y1)
 	/*
 		bot 0:
@@ -421,7 +448,7 @@ func triangulate(L0, R0, L1, R1, x0, y0, x1, y1 float64) point {
 		return midpoint(ix0, iy0n, ix1, iy1n)
 	}
 	fmt.Println("ERROR: could not localize :(")
-	return point{}
+	return pose{}
 }
 
 func localize(numBots int) {
@@ -432,7 +459,7 @@ func localize(numBots int) {
 	pos = nil
 	// dDelta := 100
 	for i := 0; i < n; i++ {
-		pos = append(pos, point{0, 0})
+		pos = append(pos, pose{0, 0, 0}) // todo, calculate rotation
 	}
 	// main loop
 	for i := 1; i < numBots; i++ {
@@ -473,7 +500,7 @@ func localize(numBots int) {
 		dL1 := xcorr(tone, lpd1.left, lpd1.sOffset)
 		dR1 := xcorr(tone, lpd1.right, lpd1.sOffset)
 		// assume bot 0 does not drift left/right (x-pos)
-		pos[1] = triangulate(dL0, dR0, dL1, dR1, pos[0].x, pos[0].y, pos[0].x+0, pos[0].y+(mpd0.Start-mpd0.End))
+		pos[1] = quadlaterate(dL0, dR0, dL1, dR1, pos[0].x, pos[0].y, pos[0].x+0, pos[0].y+(mpd0.Start-mpd0.End))
 		// pos[0].x = // TODO
 		pos[0].y += (mpd0.Start - mpd0.End) + (mpd1.Start - mpd1.End)
 		// fmt.Println(clocks)
@@ -484,131 +511,219 @@ func localize(numBots int) {
 
 // *** MAIN EXPLORATION PROCEDURE ***
 
-func explore(expTime float64) {
-	start := time.Now()
-	duration := time.Since(start)
-	for duration.Seconds() < expTime {
-		// repeat
-		duration = time.Since(start)
-	}
-}
+var (
+	paths     [][]cell          // [botID] -> the path (list) to take
+	botjobs   map[int]bool      // ids to bool
+	botids    map[cell]int      // cords to id
+	xscale    float64      = 10 // centimeters per cell
+	yscale    float64      = 10 // centimeters per cell
+	occThresh float64      = 2
+	odds      float64      = 0.85 // probability that occ(i,j)=1
+)
 
-// *** PATH PROCEDURE ***
-
-var lists []point					//the path matches to bot id as index
-var botjob map[int]bool	 //ids to bool
-var botids map[point]int //cords to id
-var visited map[point]bool //cords to bool
-
-func makeList(last point,idx int, hash_list map[point]point){
-	list := make([]point,0)
-	key := last
-	val := hash_list[idx][key]
-	for key.x != val.x  && key.y != val.y {
-		list = append([]point{key},list...);
+func generatePath(start cell, hashList map[cell]cell) []cell { // hashList : child -> parent
+	list := make([]cell, 0)
+	key := start
+	val := hashList[start]
+	for key != hashList[val] {
+		// list = append([]cell{key}, list...) // it's a forward trajectory
+		list = append(list, key)
 		key = val
-		val = hash_list[idx][key]
+		val = hashList[val]
 	}
-	return list
+	return list // head == bot
 }
 
-func do_the_thing(x int, y int){
-	last := point{x,y}
-	que := make([]point,0)
-	listMap = make(map[point]point)		//will create paths from any point back to origin
-	for a := -1; a< 2; a++ {
-		for b := -1; b < 2; b++{
-			if(a!=0 && b!=0){
-				que = append(que,point{x:x+a,y:y+b})}}}
-	listMap[last] = last
-	for len(queue != 0){
-		val = queue[0]
-		queue = queue[1:]
-		if not botjob[botids[val]]{									//the bot is not assigned yet
-			list := makeList(last,botids[val],listMap)//make the path's list
-			botjobs[botids[val]] = true								//the bot is now assigned
-			postPathBot(botids[val])									//go the steps to get there
-		}else if !visited[val] && ogm[val.x][val.y] < occupied_threashold{
-			visited[val] = true;
-			for a:=-1; a < 2; a++{
-				for b:=-1;b<2;b++{
-					if(a!=0 && b !=0){
-						que = append(que,point{x:val.x+a,y:val.y+b})}}}
+func binPose(p pose) cell {
+	return cell{x: int(p.x / xscale), y: int(p.y / yscale)}
+}
+
+type bfsQNode struct {
+	child  cell
+	parent cell
+}
+
+func bfs(origin cell, botID int) {
+	fmt.Println("performing BFS")
+	Q := make([]bfsQNode, 0)
+	listMap := make(map[cell]cell) // will create paths from any point back to origin
+	visited := make(map[cell]bool) // cords to bool
+	for a := -1; a < 2; a++ {
+		for b := -1; b < 2; b++ {
+			if a != 0 && b != 0 {
+				Q = append(Q, bfsQNode{child: cell{x: origin.x + a, y: origin.y + b}, parent: origin})
+			}
 		}
-		listMap[val] = last; //add new link
-		last = val;					 //update
+	}
+	botCell := binPose(pos[botID])
+	listMap[origin] = origin
+	for len(Q) > 0 {
+		val := Q[0]
+		Q = Q[1:]
+		listMap[val.child] = val.parent // add new link
+		if botCell.x == val.child.x && botCell.y == val.child.y {
+			// found bot, update trajectory
+			fmt.Println("found bot!")
+			paths[botID] = generatePath(botCell, listMap)
+			break
+		} else if !visited[val.child] && math.Abs(ogm[val.child]) < occThresh {
+			visited[val.child] = true
+			for a := -1; a < 2; a++ {
+				for b := -1; b < 2; b++ {
+					if a != 0 && b != 0 {
+						Q = append(Q, bfsQNode{child: cell{x: val.child.x + a, y: val.child.y + b}, parent: val.child})
+					}
+				}
+			}
+		}
 	}
 }
 
-func calculateMoveList(id int){
-		//bin the real position to the ogm
-	while(len(lists[id])>0){
-		xcur = pos.x/xscale
-		ycur = pos.y/yscale
-		//TODO - get angle
-		zpos = 0
-		newpos = lists[id]		//where i want to be
-		xnew = newpos.x
-		ynew = newpos.y
-		botids[lists[id][0]] = id //map our ogm cell position to our id
-		pos := 0
-		xdelta = xcurr-xnew
-		ydelta = ycurr-ynew
-		//make a box of of where each neighbor is
-		//1 2 3
-		//8   4
-		//7 6 5
-		if(xdelta == 1 && ydelta == -1){
-			pos = 315}
-		if(xdelta == 0 && ydelta == -1){
-			pos = 0}
-		if(xdelta == -1 && ydelta == -1){
-			pos = 45}
-		if(xdelta == -1 && ydelta == 0){
-			pos = 90}
-		if(xdelta == -1 && ydelta == 1){
-			pos = 135}
-		if(xdelta == 0 && ydelta == 1){
-			pos = 180}
-		if(xdelta == 1 && ydelta == 1){
-			pos = 225}
-		if(xdelta == 1 && ydelta == 0){
-			pos = 270}
-		to_rotate:=pos-zpos			//calculate offset of rotation 
-		if to_rotate>180
-			to_rotate = -(360-to_rotate)
-		//TODO send rotate(to_rotate)
-		set_z_pos = getZ()+to_rotate
-		if getZ()%90==0{
-			//TODO send move_straight(width of cell)
-		}else{
-			//TODO send_move_stright(diagonal of cell)
+func calculateRotation(botID int) int {
+	rot := 0
+	botCell := binPose(pos[botID])
+	xdelta := botCell.x - paths[botID][0].x
+	ydelta := botCell.y - paths[botID][0].y
+	// make a box of of where each neighbor is
+	// 1 2 3
+	// 8   4
+	// 7 6 5
+	// left == +deg, right == -deg
+	if xdelta == 1 && ydelta == -1 {
+		rot = 45
+	}
+	if xdelta == 0 && ydelta == -1 {
+		rot = 0
+	}
+	if xdelta == -1 && ydelta == -1 {
+		rot = 315
+	}
+	if xdelta == -1 && ydelta == 0 {
+		rot = 270
+	}
+	if xdelta == -1 && ydelta == 1 {
+		rot = 225
+	}
+	if xdelta == 0 && ydelta == 1 {
+		rot = 180
+	}
+	if xdelta == 1 && ydelta == 1 {
+		rot = 135
+	}
+	if xdelta == 1 && ydelta == 0 {
+		rot = 90
+	}
+	fmt.Printf("%v\t%v\t%v\n", rot, botCell, paths[botID][0])
+	return rot - int(pos[botID].r) // calculate offset of rotation
+}
+
+func policy(mpd *movPostData) {
+	// update current pose
+	pos[mpd.ID].r += mpd.Rot
+	d := math.Abs(mpd.Start - mpd.End)
+	pos[mpd.ID].x += d * math.Sin(pos[mpd.ID].r)
+	pos[mpd.ID].y += d * math.Cos(pos[mpd.ID].r)
+	if mpd.Mov == "r" {
+		// update current rotation
+		pos[mpd.ID].r = pos[mpd.ID].r + mpd.Rot
+		// tell bot to move forward
+		dist := math.Sqrt(math.Pow(pos[mpd.ID].x-xscale*float64(paths[mpd.ID][0].x), 2) + math.Pow(pos[mpd.ID].y-yscale*float64(paths[mpd.ID][0].y), 2))
+		// move forward
+		doMovPost(movForward, int(dist), mpd.ID)
+	} else {
+		// take measurement
+		d = doUltPost(mpd.ID)
+		// upate OGM based on current pose
+		c := binPose(pose{x: d*math.Sin(pos[mpd.ID].r) + pos[mpd.ID].x, y: d*math.Cos(pos[mpd.ID].r) + pos[mpd.ID].y})
+		// TODO -- update all OGM values along path (use (1-odds)/odds for occupancy evidence of zero!)
+		// ogm update rule:
+		ogm[c] += math.Log(odds / (1 - odds))
+		// select new point (POLICY -- we're doing some random/greedy policy here)
+		// -- pick K random cell points
+		// -- do BFS from point K_i to bot -> yield trajectory
+		// -- select shortest trajectory that minimizes sum(abs(occupancy)) value
+		//   -- sort by total occ
+		//   -- of best L < K, choose shortest path
+		// -> output goal point
+		// TODO
+		randCells := make([]cell, 0)
+		K := 10
+		b := binPose(pos[mpd.ID])
+		for i := 0; i < K; i++ {
+			xDelta := rand.Intn(2) + 1
+			yDelta := rand.Intn(2) + 1
+			if rand.Intn(2)%2 == 0 {
+				xDelta *= -1
+			}
+			if rand.Intn(2)%2 == 0 {
+				yDelta *= -1
+			}
+
+			randCells = append(randCells, cell{b.x + xDelta, b.y + yDelta})
 		}
-		//TODO -- wait for response did succeed or fail?
-		if succeed{
-			lists[id] = lists[id][1:] //if got there take it off list
-		}else{
-			do_the_thing(lists[id][len(lists[id])-1]) //else recalculate path
+		minIdx := 0
+		for i := 0; i < len(randCells); i++ {
+			if math.Abs(ogm[randCells[i]]) < math.Abs(ogm[randCells[minIdx]]) {
+				minIdx = i
+			}
 		}
+		if len(paths[mpd.ID]) < 2 {
+			paths[mpd.ID] = nil
+			// calculate new trajectory
+			bfs(randCells[minIdx], mpd.ID) // void, will update botID's path
+		} // else, continue on same trajectory
+		// then tell bot to rotate
+		doMovPost(movRotate, calculateRotation(mpd.ID), mpd.ID)
 	}
 }
+
+func explore(expTime float64) {
+	if !localized {
+		// assume the bots are localized:
+		// and are pointing forward
+		pos = append(pos, pose{0, 0, 0}, pose{10, 10, 0}, pose{-10, -10, 0})
+		localized = true
+	}
+	mov <- &movPostData{ID: 0, Mov: "m"} // spark it
+	ticker := time.NewTicker(1 * time.Second)
+	done := make(chan bool)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case mpd := <-mov:
+				go policy(mpd)
+			case <-ticker.C:
+				fmt.Printf(".")
+			}
+		}
+	}()
+	time.Sleep(time.Duration(expTime) * time.Second)
+	done <- true
+	printOGM()
+}
+
+func printOGM() {
+	fmt.Printf("%v\n", ogm)
+}
+
 // *** MAIN SERVER ***
 
 func main() {
 	// OGM setup
 	log.Println("Localization and Mapping setup.")
-	ogm = make(map[int]map[int]float64)
+	ogm = make(map[cell]float64)
 	bot = make([]string, 0) // num robots
-	pos = make([]point, 0)  // num robots
+	pos = make([]pose, 0)   // num robots
 	remote = make(map[string]int)
 	clocks = make([]int64, 0)
 	loc = make(chan *locPostData, n)
 	mov = make(chan *movPostData, n)
 
-	lists = make([]point,0)
-	botjob make(map[int]bool)
-	botids make(map[point]int)
-	visited make(map[point]bool)
+	paths = make([][]cell, 0)
+	botjobs = make(map[int]bool)
+	botids = make(map[cell]int)
 
 	// http setup
 	log.Println("Starting server.")
@@ -664,6 +779,7 @@ func main() {
 				bot = append(bot, newIP)
 				remote[r.RemoteAddr] = newID
 				clocks = append(clocks, t-reqBody.Clock) // move calculation up?
+				paths = append(paths, []cell{})
 			}
 
 			w.Write([]byte(strconv.Itoa(newID)))
@@ -762,27 +878,28 @@ func main() {
 			w.Write([]byte("explorin'\n"))
 		}
 	})
-	router.HandleFunc("/path", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case "POST":
-			reqBodyBytes, err := ioutil.ReadAll(r.Body)
-			if err != nil {
-				fmt.Println(err)
-			}
-			reqBody := &pathPostData{}
-			err = json.Unmarshal(reqBodyBytes, reqBody)
-			if err != nil {
-				fmt.Println(err)
-			}
-			ogm <- reqBody
-			idx = ogm.id
-			status = ogm.status
-			handlePathPost(idx,status)
-		default:
-			w.WriteHeader(http.StatusNotImplemented)
-			w.Write([]byte(http.StatusText(http.StatusNotImplemented)))
-		}
-	})
+	// TODO -- send robot trajectory, then robot gives us log of what happened
+	// router.HandleFunc("/path", func(w http.ResponseWriter, r *http.Request) {
+	// 	switch r.Method {
+	// 	case "POST":
+	// 		reqBodyBytes, err := ioutil.ReadAll(r.Body)
+	// 		if err != nil {
+	// 			fmt.Println(err)
+	// 		}
+	// 		reqBody := &pathPostData{}
+	// 		err = json.Unmarshal(reqBodyBytes, reqBody)
+	// 		if err != nil {
+	// 			fmt.Println(err)
+	// 		}
+	// 		ogm <- reqBody
+	// 		idx = ogm.id
+	// 		status = ogm.status
+	// 		handlePathPost(idx, status)
+	// 	default:
+	// 		w.WriteHeader(http.StatusNotImplemented)
+	// 		w.Write([]byte(http.StatusText(http.StatusNotImplemented)))
+	// 	}
+	// })
 	server := &http.Server{
 		Addr:    ":" + strconv.Itoa(port),
 		Handler: logging(logger)(router),

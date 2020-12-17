@@ -9,7 +9,6 @@
 #define MICR A2
 
 #define MPU_ADDR 0x68
-#define Z_WEIGHT 0.00000382
 #define rot_err 0.25
 
 #define MAX_LR_MIC_SAMPLES 2048
