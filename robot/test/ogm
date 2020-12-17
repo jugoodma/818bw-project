@@ -1,0 +1,172 @@
+//assume the size of the room is AxB
+
+xscale = 2
+yscale = 2
+ogm = [2A][2B]	//twice as much because we don't know where we start in the world
+//-1 empty
+// 0 maybe
+// 1 confident
+//lets start in middle of grid.
+xpos = A
+ypos = B
+zpos = 0;
+
+newval = false;
+
+xbin(val)
+	return val/xscale
+
+ybin(val)
+	return val/yscale
+
+update(dist,xpos,ypos,zpos)
+	updatex = cos(zpos)*dist
+	updatey = sin(zpos)*dist
+	if(ogm
+	if ogm[xbin(xpos+updatex)][ybin(ypos+updatey)] == empty
+		newVal = true;
+	if ogm[xbin(xpos+updatex)][ybin(ypos+updatey)] == empty
+		
+
+updateCurr
+	dist = getUltrasonic()
+	update(dist,xpos,ypos,zpos)
+	return dist
+
+move_straight(dist)
+	nano_move(dist);
+	updatex = cos(zpos)*dist
+	updatey = sin(zpos)*dist
+	xpos = xpos+=updatex
+	ypos = ypos+=updatey
+
+rotate(degree)
+	nano_rotate(degree)
+	zpos += degree
+	return updateCurr
+
+getSurrondings
+	from 0 to 8
+		rotate(45)
+	
+
+botloc = [(botLoc,false), (bot2Loc,false), (bot3Loc,false)]
+que = new()
+hash = Hash.new() //we made not need the enire has, we may just need like last 3 values or something.
+rot = Hash.new();
+for(i in range(len(botloc))
+	rot[i] = 0;
+list_to_bot = Hash.new()
+
+//idea hash the tail of list to val before it.
+makeList(last)
+	list = []
+	key = last; val = -1
+	while(key != val)
+		list.append(key);
+		key = hash[key];	
+		val = hash[key];
+	return list
+
+
+do_the_thing(x,y)
+	last = x,y
+	from i in -1 to 1
+		from j in -1 to 1
+			if(i==j==0)
+			else
+				que.add(x+i,y+j)
+	hash[(x,y) = last;
+	while(not que.empty){
+		x,y = que.dequeue	
+		if ((x,y),false) in botloc //so if it reaches a bot that is not already assinged
+			idx = indexof((x,y),false) in botloc
+			botloc[idx] = ((x,y),false)
+
+			l = makelist(last); //make the list and send it to robot
+			list_to_bot[idx] = l;
+			
+			//CLIENT_SIDE VARIATION
+			sendListToBot(l); //send list to robot.
+			
+			//SERVER_SIDE VARIATION
+			server_calc(l,idx);
+
+			//there could be other ways to do this.
+
+		else if (x,y) != visited and ogm[x][y] < occupied threashold
+			from i in -1 to 1
+				from j in -1 to 1
+					if(i==j==0)
+					else
+						que.add(x+i,y+j)
+			hash[val] = last
+			last = val;
+
+thing_to_do
+	// so for each bot do this
+	while(z in range(numberBots))
+		que = new() //for bfs
+		hash = Hash.new //to make the list
+		x,y = getRandom() //find the random point to explore
+		do_the_thing(x,y)
+	}
+
+
+//CLIENT SIDE VARIATION
+sendListToBot(l)
+	idx.send(l.head)
+	//robot then calculates how to get there. then POSTs to /vec or something sucess or not, along with id.
+
+/vec(success, id)
+	v = bot_to_list[id].head 
+	if(sucess)
+		bot_to_list[id] = v.rest //take off head
+		//botloc[id] = (v.x,v.y) - i dont think this is needed right now
+		id.send(bot_to_list[id].head)
+	else
+		botloc[id] = (v.x,v.y)  //update bot location
+		do_the_thing(list_to_bot[id].last) //recalculate path.
+
+//SERVER_SIDE VARIATION
+//onetime setup
+cords_to_pos = Hash.new()
+cords_to_pos[ 1,-1] = 315
+cords_to_pos[ 0,-1] = 0
+cords_to_pos[-1,-1] = 45
+cords_to_pos[-1, 0] = 90
+cords_to_pos[-1, 1] = 135
+cords_to_pos[ 0, 1] = 180
+cords_to_pos[ 1, 1] = 225
+cords_to_pos[ 1, 0] = 270
+
+rotate_pos(pos)
+	pos++
+	if pos == 9
+		pos = 1
+	return pos;
+
+server_cal(l,idx)
+	while(not l.empty())
+		x,y = botloc[id]
+		z = rot[idx]
+		xnew, ynew = l.head
+		// 1 2 3
+		// 8   4
+		// 7 6 5
+		pos = cords_to_pos[x-xnew, y-ynew];
+		to_rotate = pos - z
+		if(to_rotate > 180)
+			to_rotate = -(360-to_rotate)
+		rotate(to_rotate)	
+		rot[idx] = z+to_rotate
+		if rot[idx]%90==0
+			v = move_stright(width_of_cell)
+		else
+			v = move_stright(diagonal_of_cell)
+		//wait for post? or just use return value of server's post?
+		if(sucess)
+			l= l.rest
+		else
+			do_the_thing(l.last)
+
