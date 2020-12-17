@@ -436,6 +436,105 @@ func explore(expTime float64) {
 	}
 }
 
+// *** PATH PROCEDURE ***
+
+var lists []point					//the path matches to bot id as index
+var botjob map[int]bool	 //ids to bool
+var botids map[point]int //cords to id
+var visited map[point]bool //cords to bool
+
+func makeList(last point,idx int, hash_list map[point]point){
+	list := make([]point,0)
+	key := last
+	val := hash_list[idx][key]
+	for key.x != val.x  && key.y != val.y {
+		list = append([]point{key},list...);
+		key = val
+		val = hash_list[idx][key]
+	}
+	return list
+}
+
+func do_the_thing(x int, y int){
+	last := point{x,y}
+	que := make([]point,0)
+	listMap = make(map[point]point)		//will create paths from any point back to origin
+	for a := -1; a< 2; a++ {
+		for b := -1; b < 2; b++{
+			if(a!=0 && b!=0){
+				que = append(que,point{x:x+a,y:y+b})}}}
+	listMap[last] = last
+	for len(queue != 0){
+		val = queue[0]
+		queue = queue[1:]
+		if not botjob[botids[val]]{									//the bot is not assigned yet
+			list := makeList(last,botids[val],listMap)//make the path's list
+			botjobs[botids[val]] = true								//the bot is now assigned
+			postPathBot(botids[val])									//go the steps to get there
+		}else if !visited[val] && ogm[val.x][val.y] < occupied_threashold{
+			visited[val] = true;
+			for a:=-1; a < 2; a++{
+				for b:=-1;b<2;b++{
+					if(a!=0 && b !=0){
+						que = append(que,point{x:val.x+a,y:val.y+b})}}}
+		}
+		listMap[val] = last; //add new link
+		last = val;					 //update
+	}
+}
+
+func calculateMoveList(id int){
+		//bin the real position to the ogm
+	while(len(lists[id])>0){
+		xcur = pos.x/xscale
+		ycur = pos.y/yscale
+		//TODO - get angle
+		zpos = 0
+		newpos = lists[id]		//where i want to be
+		xnew = newpos.x
+		ynew = newpos.y
+		botids[lists[id][0]] = id //map our ogm cell position to our id
+		pos := 0
+		xdelta = xcurr-xnew
+		ydelta = ycurr-ynew
+		//make a box of of where each neighbor is
+		//1 2 3
+		//8   4
+		//7 6 5
+		if(xdelta == 1 && ydelta == -1){
+			pos = 315}
+		if(xdelta == 0 && ydelta == -1){
+			pos = 0}
+		if(xdelta == -1 && ydelta == -1){
+			pos = 45}
+		if(xdelta == -1 && ydelta == 0){
+			pos = 90}
+		if(xdelta == -1 && ydelta == 1){
+			pos = 135}
+		if(xdelta == 0 && ydelta == 1){
+			pos = 180}
+		if(xdelta == 1 && ydelta == 1){
+			pos = 225}
+		if(xdelta == 1 && ydelta == 0){
+			pos = 270}
+		to_rotate:=pos-zpos			//calculate offset of rotation 
+		if to_rotate>180
+			to_rotate = -(360-to_rotate)
+		//TODO send rotate(to_rotate)
+		set_z_pos = getZ()+to_rotate
+		if getZ()%90==0{
+			//TODO send move_straight(width of cell)
+		}else{
+			//TODO send_move_stright(diagonal of cell)
+		}
+		//TODO -- wait for response did succeed or fail?
+		if succeed{
+			lists[id] = lists[id][1:] //if got there take it off list
+		}else{
+			do_the_thing(lists[id][len(lists[id])-1]) //else recalculate path
+		}
+	}
+}
 // *** MAIN SERVER ***
 
 func main() {
@@ -448,6 +547,11 @@ func main() {
 	clocks = make([]int64, 0)
 	loc = make(chan *locPostData, n)
 	mov = make(chan *movPostData, n)
+
+	lists = make([]map[point]point,n)
+	botjob make(map[int]bool)
+	botids make(map[point]int)
+	visited make(map[point]bool)
 
 	// http setup
 	log.Println("Starting server.")
@@ -599,6 +703,27 @@ func main() {
 		} else {
 			go explore(expTime)
 			w.Write([]byte("explorin'\n"))
+		}
+	})
+	router.HandleFunc("/path", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "POST":
+			reqBodyBytes, err := ioutil.ReadAll(r.Body)
+			if err != nil {
+				fmt.Println(err)
+			}
+			reqBody := &pathPostData{}
+			err = json.Unmarshal(reqBodyBytes, reqBody)
+			if err != nil {
+				fmt.Println(err)
+			}
+			ogm <- reqBody
+			idx = ogm.id
+			status = ogm.status
+			handlePathPost(idx,status)
+		default:
+			w.WriteHeader(http.StatusNotImplemented)
+			w.Write([]byte(http.StatusText(http.StatusNotImplemented)))
 		}
 	})
 	server := &http.Server{
