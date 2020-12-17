@@ -605,7 +605,7 @@ func main() {
 	loc = make(chan *locPostData, n)
 	mov = make(chan *movPostData, n)
 
-	lists = make([]map[point]point,n)
+	lists = make([]point,0)
 	botjob make(map[int]bool)
 	botids make(map[point]int)
 	visited make(map[point]bool)
