@@ -9,30 +9,26 @@
 #define MICR A2
 
 #define MPU_ADDR 0x68
-#define rot_err 5
+#define Z_WEIGHT 0.00000382
+#define rot_err 0.25
 
 #define MAX_LR_MIC_SAMPLES 2048
 
 // global variables
 
 long z_cal = 0;
-long angle = 0;
-long gyroZ = 0;
-long old_Z = 0;
-long timePast = 0;
-long timePresent = 0;
 
 // main stuff
 
 void setup() {
   delay(1000);
-  Serial.begin(115200); // 38400
+  Serial.begin(115200);
   Wire.begin();
   analogReference(INTERNAL); // can take out?
   // After changing the analog reference, the first few readings from analogRead() may not be accurate.
   motor_setup();
   mpu_setup();
-  callibrateGyroValues();
+  callibrateGyroValues(5000);
   mic_setup(128);
   // accel_setup();
   sync_board(10000);
@@ -51,7 +47,7 @@ void loop() {
     else if(buf[0] == 'f')
       move_straight(param1);
     else if(buf[0] == 'r')
-      move_rotate(param1);
+      move_rotate((short) param1);
   }
 }
 
@@ -117,17 +113,24 @@ void motor_setup() {
   motors_off();
 }
 
-void mpu_setup(){
-  Wire.beginTransmission(0b1101000);          // Start the communication by using address of MPU
-  Wire.write(0x6B);                           // Access the power management register
-  Wire.write(0b00000000);                     // Set sleep = 0
-  Wire.endTransmission();                     // End the communication
+void mpu_setup() {
+  Wire.beginTransmission(0b1101000); // Start the communication by using address of MPU
+  Wire.write(0x6B); // Access the power management register
+  Wire.write(0b00000000); // Set sleep = 0
+  Wire.endTransmission(); // End the communication
 
   // configure gyro
   Wire.beginTransmission(0b1101000);
-  Wire.write(0x1B);                           // Access the gyro configuration register
-  Wire.write(0b00000000);
+  Wire.write(0x1B); // Access the gyro configuration register
+  Wire.write(0x10);
   Wire.endTransmission();
+}
+
+void callibrateGyroValues(int samples) {
+  for (int i = 0; i < samples; i++) {
+    z_cal = z_cal + gyro_z();
+  }
+  z_cal = z_cal/samples;
 }
 
 boolean sync_board(int max_ms) {
@@ -216,79 +219,49 @@ void move_straight(unsigned short max_time) {
   Serial.write((byte *) buf, 4);
 }
 
-// TODO!
-void callibrateGyroValues() {
-  for (int i=0; i<5000; i++) {
-    getGyroValues();
-    z_cal = z_cal + gyroZ;
-  }
-  z_cal = z_cal/5000;
-}
-
-void getGyroValues() {
+long gyro_z() {
+  // retrieve and return the raw gyro_z value
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x47);
   Wire.endTransmission();
-  Wire.requestFrom(MPU_ADDR,2);
-  while(Wire.available() < 2);    
-  gyroZ = Wire.read()<<8|Wire.read();
+  Wire.requestFrom(MPU_ADDR, 2);
+  while(Wire.available() < 2);
+  // only care about Z rotation
+  return Wire.read()<<8|Wire.read();
 }
 
-long updateGyro(){
-  old_Z = gyroZ;
-  timePast = timePresent;
-  timePresent = millis();
-  getGyroValues();
-  angle = angle + ((timePresent - timePast)*(gyroZ + old_Z - 2*z_cal)) * 0.00000382;
-  delay(10);
-  return angle;
+float angle_delta(long old_z, long new_z, unsigned long old_time, unsigned long new_time) {
+  // calculate the degrees of angles traveled over old_time to now
+  // (integrate)
+  return ((new_time - old_time)/1000.0)*((new_z-z_cal) / 32.8);
 }
 
-void correct_turn(int degree){
-  int count = 5;
-    //idea: while the overshot degree is over the threashold
-  // go the opposite direction and get a new overshot.
-  while(abs(degree) > rot_err && count >=0){
-    long lal = updateGyro();
-    if(degree > 0){
-      turn_Right();
-      while(abs(lal-updateGyro())<degree);
-      motors_off();
-      degree = -(abs(lal-updateGyro())-degree);
-      count--;
-    }else{
-      turn_Left();
-      while(abs(lal-updateGyro())<-degree);
-      motors_off();
-      degree = abs(lal-updateGyro())+degree;
-      count--;
+void move_rotate(short deg) {
+  // deg == how far to rotate (- == left, + == right)
+  unsigned long start_time = millis(), prev_time = millis(), curr_time = millis();
+  long prev_z = gyro_z(), curr_z = gyro_z();
+  float curr_angle = 0; // starting angle always zero, goal to equal deg
+  byte buf[sizeof(float)] = {0xf7};
+  while(abs(curr_angle - deg) > rot_err && curr_time - start_time < 5000) {
+    // take gyro_z reading
+    prev_time = curr_time;
+    curr_time = millis();
+    prev_z = curr_z;
+    curr_z = gyro_z();
+    // add the angle change
+    curr_angle += angle_delta(prev_z, curr_z, prev_time, curr_time);
+    // LEFT == +deg, RIGHT == -deg
+    if(curr_angle - deg > 0) {
+      motors_rig();
+    } else {
+      motors_lef();
     }
+    delay(20);
+    motors_off();
+    delay(40);
   }
-}
-
-void rotate_right(int degree){
-  long lal = updateGyro();
-  motors_rig();
-  while(abs(lal-updateGyro())<degree);
-  motors_off();
-  //this will always be an overshoot so negative tells correct if
-  //the overshoot is left or right
-  correct_turn(-(abs(lal-updateGyro())-degree));
-}
-
-void rotate_left(int degree){
-  long lal = updateGyro();
-  motors_lef();
-  while(abs(lal-updateGyro())<degree);
-  motors_off();
-  correct_turn(abs(lal-updateGyro())-degree);
-}
-
-void move_rotate(unsigned short deg){
-  timePresent = millis();
-  if(deg > 0){
-    rotate_right(deg);
-  }else{
-    rotate_left(-deg);
-  }
+  Serial.write((byte *) buf, 2); // ack done
+//  long ang = (long) curr_angle;
+//  Serial.write((byte *) &ang, sizeof(long));
+  Serial.write((byte *) &curr_angle, sizeof(float));
 }

@@ -26,7 +26,7 @@ byte samples[2*2*MAX_LR_MIC_SAMPLES] = {0};
 
 void setup() {
   delay(1000);
-  Serial.begin(115200); // 38400
+  Serial.begin(115200);
   sound_setup();
   usonic_setup();
   if (sync_board(10000)) {
@@ -148,6 +148,10 @@ boolean sync_board(int max_ms) {
     }
     delay(50);
   }
+  while (Serial.available()) {
+    Serial.read();
+    delay(1);
+  } // clear buffer
   return count >= 4;
 }
 
@@ -286,7 +290,7 @@ void listen_sig(unsigned short post_time, unsigned short delay_time) {
     while (Serial.available() > 0) {
       samples[ptr] = Serial.read();
       if (flop) {
-        flag = ptr > 3 && ((samples[ptr-3] & samples[ptr-2] & samples[ptr-1] & samples[ptr]) == 0xff);
+        flag = ptr > 3 && ((samples[ptr-3] ^ samples[ptr-2] ^ samples[ptr-1] ^ samples[ptr]) == 0xff);
         if (flag) break;
         ptr++;
         if (ptr >= 2*2*MAX_LR_MIC_SAMPLES) break;
@@ -311,11 +315,8 @@ void listen_sig(unsigned short post_time, unsigned short delay_time) {
     message += ",";
     delay(1);
   }
-//  message += samples[ptr-4];
   message.setCharAt(message.length()-1, '\"'); // replace comma
   message += "}";
-//  ((unsigned long *) (samples+ptr-3))[0] = 0; // reset stop
-//  ((unsigned short *) (samples+ptr-3))[1] = 0;
   send_loc(message);
 }
 
@@ -344,14 +345,35 @@ void motor_sig(char sig, short param) {
     while (Serial.availableForWrite() < 5) {;}
     Serial.write(out_buf, 5);
     Serial.flush();
+    // wait for finish signal
+    ((unsigned long *) out_buf)[0] = 0x00000000;
+    while ((out_buf[0] ^ out_buf[1]) != 0xf7) {
+      out_buf[1] = out_buf[0];
+      out_buf[0] = Serial.read();
+      delay(1);
+    }
+//    byte tmp[4] = {0};
+//    for (int i = 0; i < 4; i++) {
+//      tmp[i] = Serial.read();
+////      send_debug(String(tmp[i], HEX));
+//    }
+    float ang = 0;
+    Serial.readBytes((byte *) &ang, sizeof(float));
+//    delay(250);
+    // tell server what happened
+    String message = "{\"id\":";
+    message += ID;
+    message += ",\"rot\":";
+    message += ang;
+    message += "}";
+    send_mov(message);
   } else {
     if (sig == 'b') {
       param *= -1;
     }
     boolean flag = true;
-    unsigned short max_computation = 10000;
+    unsigned short max_computation = 20000;
     out_buf[0] = 'f';
-//    memcpy(out_buf, &sig, 1);
     memcpy(out_buf+1, &max_computation, sizeof(short));
     memcpy(out_buf+3, &max_computation, sizeof(short));
     while (Serial.availableForWrite() < 5) {;}
@@ -416,13 +438,15 @@ void motor_sig(char sig, short param) {
       Serial.flush();
     }
     ((unsigned long *) out_buf)[0] = 0xffffffff;
+    // this is not guaranteed to wait for the NANO?
+    // TODO!
     while (Serial.available() > 0) {
       out_buf[0] = out_buf[0] & Serial.read();
       if (out_buf[0] | out_buf[1] == 0) break;
       out_buf[1] = out_buf[0];
       delay(1);
     }
-    delay(250);
+//    delay(250);
     // tell server what happened
     String message = "{\"id\":";
     message += ID;
@@ -432,8 +456,5 @@ void motor_sig(char sig, short param) {
     message += read_ult(10);
     message += "}";
     send_mov(message);
-//    beep(100, 110);
-//    delay(200);
-//    beep(200, 264);
   }
 }

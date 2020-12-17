@@ -35,14 +35,8 @@ var clocks []int64        // [int ID] -> millisecond start time offset
 var n int = 2             // total number of bots
 
 const (
-	tone      int     = 300
+	tone      int     = 300  // same as on ESP board
 	micLRDist float64 = 10.1 // cm distance between the L and R mics
-)
-
-type key int
-
-const (
-	requestIDKey key = 0
 )
 
 // registration received json
@@ -130,7 +124,10 @@ type movPostData struct {
 	ID    int     `json:"id"`
 	Start float64 `json:"start,omitempty"`
 	End   float64 `json:"end,omitempty"`
+	Rot   float64 `json:"rot,omitempty"`
 }
+
+// NOTING HERE -- rotation: + is left, - is right
 
 var loc chan *locPostData
 var mov chan *movPostData
@@ -365,11 +362,11 @@ func triangulate(L0, R0, L1, R1, x0, y0, x1, y1 float64) point {
 	case 3:
 		return midpoint(ix0, iy0n, ix1, iy1n)
 	}
-	fmt.Println("something went wrong?")
+	fmt.Println("ERROR: could not localize :(")
 	return point{}
 }
 
-func localize() {
+func localize(numBots int) {
 	// assume num_bots n >= 2
 	// assume leader == 0 -- this is the bot we localize everyone relative to
 	// LOCALIZE BOT i TO BOT 0
@@ -383,67 +380,55 @@ func localize() {
 		//
 		// (1) COLLECT AUDIO SAMPLES
 		//
+		dDelta := 100 // cm
 		// bot i speaks to listener 0
-		dL := make([]float64, 0)
-		dR := make([]float64, 0)
-		s := 10
-		for j := 0; j < s; j++ {
-			// spd0, lpd0, _ := listenAndSpeak(delayTime, i) // wait
-			_, lpd0, _ := listenAndSpeak(delayTime, i)
-			lpd0.formatSamples()
-			// lpd0.sOffset = int(((spd0.Start + clocks[i]) - (lpd0.Start + clocks[0])) * (int64(len(lpd0.left)) / lpd0.Total))
-			dL = append(dL, xcorr(tone, lpd0.left, lpd0.sOffset))
-			dR = append(dR, xcorr(tone, lpd0.right, lpd0.sOffset))
-			time.Sleep(time.Second * 1)
-		}
-		dL0 := 0.0
-		dR0 := 0.0
-		for j := 0; j < s; j++ {
-			dL0 = dL0 + dL[j]
-			dR0 = dR0 + dR[j]
-		}
-		dL0 = dL0 / float64(s)
-		dR0 = dR0 / float64(s)
-		fmt.Println(dL, dR)
-		fmt.Println(dL0, dR0)
-
-		// // listener 0 moves forward
-		// doMovPost(movForward, dDelta, 0)
-		// // wait
-		// mpd0 := <-mov
-		// // update 0's position (assume no drift) TODO
-		// time.Sleep(time.Second * 1) // small pause
-		// // bot i speaks to listener 0
-		// spd1, lpd1, _ := listenAndSpeak(delayTime, i) // wait
-		// // listener 0 moves back
-		// doMovPost(movBackward, dDelta, 0)
-		// mpd1 := <-mov
-		// //
-		// // (2) CROSS-CORRELATION WITH TONE
-		// //
-		// lpd0.formatSamples()
-		// lpd1.formatSamples()
-		// fmt.Printf("L1=%v;\nR1=%v;\n\nL2=%v;\nR2=%v;\n\n", lpd0.left, lpd0.right, lpd1.left, lpd1.right)
-		// // calculate offsets
-		// // server true start time:
-		// //  STs = lpdSPEAKER.Start + clocks[1]
-		// //  STm = lpdLISTENR.Start + clocks[0]
-		// // idx = (STs - STm)*(len(lpdi.left)/500) (average with right?)
-		// // lpdLISTENR.sOffset = idx
-		// // ((t1+t2)/2)
-		// lpd0.sOffset = int(((spd0.Start + clocks[i]) - (lpd0.Start + clocks[0])) * (int64(len(lpd0.left)) / lpd0.Total))
-		// lpd1.sOffset = int(((spd1.Start + clocks[i]) - (lpd1.Start + clocks[0])) * (int64(len(lpd1.left)) / lpd1.Total))
-		// dL0 := xcorr(tone, lpd0.left, lpd0.sOffset)
-		// dR0 := xcorr(tone, lpd0.right, lpd0.sOffset)
-		// dL1 := xcorr(tone, lpd1.left, lpd1.sOffset)
-		// dR1 := xcorr(tone, lpd1.right, lpd1.sOffset)
-		// // assume bot 0 does not drift left/right (x-pos)
-		// pos[1] = triangulate(dL0, dR0, dL1, dR1, pos[0].x, pos[0].y, pos[0].x+0, pos[0].y+(mpd0.Start-mpd0.End))
-		// // pos[0].x = // TODO
-		// pos[0].y += (mpd0.Start - mpd0.End) + (mpd1.Start - mpd1.End)
-		// // fmt.Println(clocks)
-		// // fmt.Printf("speaker index starts:\n %v\t%v\n", lpd0.sOffset, lpd1.sOffset)
+		spd0, lpd0, _ := listenAndSpeak(delayTime, i) // wait
+		// listener 0 moves forward
+		doMovPost(movForward, dDelta, 0)
+		// wait
+		mpd0 := <-mov
+		// update 0's position (assume no drift) TODO
+		time.Sleep(time.Second * 1) // small pause
+		// bot i speaks to listener 0
+		spd1, lpd1, _ := listenAndSpeak(delayTime, i) // wait
+		// listener 0 moves back
+		doMovPost(movBackward, dDelta, 0)
+		mpd1 := <-mov
+		//
+		// (2) CROSS-CORRELATION WITH TONE
+		//
+		lpd0.formatSamples()
+		lpd1.formatSamples()
+		fmt.Printf("L1=%v;\nR1=%v;\n\nL2=%v;\nR2=%v;\n\n", lpd0.left, lpd0.right, lpd1.left, lpd1.right)
+		// calculate offsets
+		// server true start time:
+		//  STs = lpdSPEAKER.Start + clocks[1]
+		//  STm = lpdLISTENR.Start + clocks[0]
+		// idx = (STs - STm)*(len(lpdi.left)/500) (average with right?)
+		// lpdLISTENR.sOffset = idx
+		// ((t1+t2)/2)
+		lpd0.sOffset = int(((spd0.Start + clocks[i]) - (lpd0.Start + clocks[0])) * (int64(len(lpd0.left)) / lpd0.Total))
+		lpd1.sOffset = int(((spd1.Start + clocks[i]) - (lpd1.Start + clocks[0])) * (int64(len(lpd1.left)) / lpd1.Total))
+		dL0 := xcorr(tone, lpd0.left, lpd0.sOffset)
+		dR0 := xcorr(tone, lpd0.right, lpd0.sOffset)
+		dL1 := xcorr(tone, lpd1.left, lpd1.sOffset)
+		dR1 := xcorr(tone, lpd1.right, lpd1.sOffset)
+		// assume bot 0 does not drift left/right (x-pos)
+		pos[1] = triangulate(dL0, dR0, dL1, dR1, pos[0].x, pos[0].y, pos[0].x+0, pos[0].y+(mpd0.Start-mpd0.End))
+		// pos[0].x = // TODO
+		pos[0].y += (mpd0.Start - mpd0.End) + (mpd1.Start - mpd1.End)
+		// fmt.Println(clocks)
+		// fmt.Printf("speaker index starts:\n %v\t%v\n", lpd0.sOffset, lpd1.sOffset)
 		fmt.Printf("localized %v to leader\n%v\n", i, pos)
+	}
+}
+
+func explore(expTime float64) {
+	start := time.Now()
+	duration := time.Since(start)
+	for duration.Seconds() < expTime {
+		// repeat
+		duration = time.Since(start)
 	}
 }
 
@@ -451,7 +436,7 @@ func localize() {
 
 func main() {
 	// OGM setup
-	log.Println("Occupancy Grid Mapping setup.")
+	log.Println("Localization and Mapping setup.")
 	ogm = make(map[int]map[int]float64)
 	bot = make([]string, 0) // num robots
 	pos = make([]point, 0)  // num robots
@@ -476,6 +461,7 @@ func main() {
 	//   set up endpoint stop
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// MAIN SERVER ENDPOINT HANDLERS
 	router.HandleFunc("/end", func(w http.ResponseWriter, r *http.Request) {
 		// w.Header().Set("Content-Type", "application/json")
 		// print whatever statistics
@@ -589,6 +575,28 @@ func main() {
 		}
 		w.Write([]byte(`thanks!`))
 	})
+	router.HandleFunc("/localize", func(w http.ResponseWriter, r *http.Request) {
+		// eg: POST "3" will localize the first three bots relative to 0
+		reqBodyBytes, err := ioutil.ReadAll(r.Body)
+		numBots, err := strconv.Atoi(string(reqBodyBytes))
+		if err != nil || numBots < 2 || numBots > n || numBots > len(bot) {
+			w.Write([]byte("invalid bot!\n"))
+		} else {
+			go localize(numBots)
+			w.Write([]byte("performing localization.\n"))
+		}
+	})
+	router.HandleFunc("/explore", func(w http.ResponseWriter, r *http.Request) {
+		// eg: POST "3" will explore for 3 seconds
+		reqBodyBytes, err := ioutil.ReadAll(r.Body)
+		expTime, err := strconv.ParseFloat(string(reqBodyBytes), 64)
+		if err != nil || expTime < 0 { // or not localized...
+			w.Write([]byte("invalid exploration time!\n"))
+		} else {
+			go explore(expTime)
+			w.Write([]byte("explorin'\n"))
+		}
+	})
 	server := &http.Server{
 		Addr:    ":" + strconv.Itoa(port),
 		Handler: logging(logger)(router),
@@ -602,25 +610,6 @@ func main() {
 			// unexpected error. port in use?
 			log.Fatalf("ListenAndServe(): %v\n", err)
 		}
-	}()
-
-	// spawn processor thread
-	go func() {
-		log.Println("calculation initializing...")
-		// localization setup
-		for {
-			if len(bot) >= n {
-				break
-			}
-		}
-		time.Sleep(time.Second * 3)
-		log.Printf("[DATA] %v bot(s) have registered -- starting localization procedure\n", len(bot))
-		localize()
-		log.Println("[DATA] localization completed.")
-		// start planning and exploration
-
-		// just end for now
-		cancel()
 	}()
 
 	// block wait for shutdown
