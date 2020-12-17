@@ -8,11 +8,16 @@ import (
 	"io/ioutil"
 	"log"
 	"math"
+	"math/cmplx"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mjibson/go-dsp/dsputils"
+
+	"github.com/mjibson/go-dsp/fft"
 )
 
 type point struct {
@@ -216,7 +221,36 @@ func listenAndSpeak(delayTime int64, botID int) (*locPostData, *locPostData, int
 	return spd0, lpd0, (posTime - preTime - listenerSetupTime) / 2 // avg wifi flight time
 }
 
+func findTransformLength(m int) int {
+	m = 2 * m
+	for {
+		r := m
+		for _, p := range []int{2, 3, 5, 7} {
+			for r > 1 && r%p == 0 {
+				r = r / p
+			}
+		}
+		if r == 1 {
+			break
+		}
+		m = m + 1
+	}
+	return m
+}
+
 func xcorr(freq int, samples []float64, offset int) float64 {
+	/*
+		matlab:
+		% Transform both vectors
+		X = fft(x,2^nextpow2(2*M-1));
+		Y = fft(y,2^nextpow2(2*M-1));
+
+		% Compute cross-correlation
+		c = ifft(X.*conj(Y));
+	*/
+	//
+	// TODO -- this does not work properly
+	//
 	// generate "sent" tone
 	// ts = (listenTime/1000)/len(samples)
 	//  0:ts:speakTime -> speakTime-0/ts iterations
@@ -233,33 +267,57 @@ func xcorr(freq int, samples []float64, offset int) float64 {
 		tx = append(tx, math.Sin(2.0*math.Pi*float64(freq)*(i/up*listenTime)))
 		i = i + 1
 	}
-	// fmt.Println(len(samples))
-	// fmt.Println(tx)
-	// calculate lags
-	// starting at the provided offset index
-	lags := make([]float64, 0)
+	//
+	nR := 0.0
+	for i := 0; i < len(samples); i++ {
+		nR = nR + math.Pow(math.Abs(samples[i]), 2)
+	}
+	nR = math.Sqrt(nR)
+	nT := 0.0
+	for i := 0; i < len(tx); i++ {
+		nT = nT + math.Pow(math.Abs(tx[i]), 2)
+	}
+	nT = math.Sqrt(nT)
+	//
+	// corr(a, b) = ifft(fft(a_and_zeros) * conj(fft(b_and_zeros))) / norm(a)*norm(b)
+	size := dsputils.NextPowerOf2(len(samples) + len(tx) - 1)
+	a := fft.FFT(dsputils.ZeroPad(dsputils.ToComplex(samples), size))
+	b := fft.FFT(dsputils.ZeroPad(dsputils.ToComplex(tx), size))
+	m := make([]complex128, 0)
+	for i := 0; i < size; i++ {
+		m = append(m, a[i]*cmplx.Conj(b[i]))
+	}
+	corr := fft.IFFT(m)
+	// matlab:
+	// % Keep only the lags we want and move negative lags before positive
+	// % lags.
+	// c = [c1(m2 - mxl + (1:mxl)); c1(1:mxl+1)];
+	scaled := make([]float64, 0)
+	// maxLag == numSamples
+	k := findTransformLength(len(samples))
+	// fmt.Println(k)
+	for i := 0; i < len(samples); i++ {
+		scaled = append(scaled, real(corr[k-len(samples)-1+i])/(nR*nT))
+	}
+	for i := 0; i < len(samples); i++ {
+		scaled = append(scaled, real(corr[i])/(nR*nT))
+	}
 	maxIdx := 0
-	maxLag := 0.0
-	for i := 0; i <= len(samples)-len(tx); i++ {
-		lag := 0.0
-		// correlation
-		for j := 0; j < len(tx); j++ {
-			lag = lag + (samples[i+j] * tx[j])
-		}
-		lags = append(lags, lag)
-		if lag > maxLag {
+	for i := range scaled {
+		if math.Abs(scaled[i]) > math.Abs(scaled[maxIdx]) {
 			maxIdx = i
-			maxLag = lag
 		}
 	}
-	// fmt.Println(lags)
+	maxIdx = maxIdx - len(samples) // shift back
+	// fmt.Println(corr)
+	// fmt.Println(scaled)
 	// estimate distance
 	c := 343.0                       // meters per second
 	i = float64(maxIdx - offset + 1) // sample (need abs?)
 	// fmt.Println(lags)
 	// fmt.Println(maxLag)
 	// print distance
-	// fmt.Println(offset, maxIdx, i, i*listenTime*c*100/numSamples)
+	fmt.Println(offset, maxIdx, i, i*listenTime*c*100/numSamples)
 	return i * listenTime * c * 100 / numSamples // 100 cm/m
 }
 
@@ -389,8 +447,7 @@ func localize(numBots int) {
 		// wait
 		mpd0 := <-mov
 		// update 0's position (assume no drift) TODO
-		time.Sleep(time.Second * 5)
-		// time.Sleep(time.Second * 1) // small pause
+		time.Sleep(time.Second * 1) // small pause
 		// bot i speaks to listener 0
 		spd1, lpd1, _ := listenAndSpeak(delayTime, i) // wait
 		// listener 0 moves back
