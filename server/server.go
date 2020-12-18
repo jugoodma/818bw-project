@@ -43,6 +43,7 @@ var (
 	ogm       map[cell]float64
 	bot       []string           // [int ID] -> "ip-addr"
 	pos       []pose             // [(x,y,r)] ; index == botID
+	traj      [][]pose           // list of pose trajectories
 	remote    map[string]int     // "bot remote addr" -> int ID      TODO delete
 	clocks    []int64            // [int ID] -> millisecond start time offset
 	n         int            = 2 // total number of bots
@@ -518,7 +519,7 @@ var (
 	xscale    float64      = 10 // centimeters per cell
 	yscale    float64      = 10 // centimeters per cell
 	occThresh float64      = 2
-	odds      float64      = 0.7 // probability that occ(i,j)=1
+	odds      float64      = 0.85 // probability that occ(i,j)=1
 )
 
 func binPose(p pose) cell {
@@ -579,42 +580,49 @@ func bfs(origin cell, botID int) {
 }
 
 func calculateRotation(botID int) int {
-	fmt.Println("calculating rotation.")
-	rot := 0
+	/*
+		eg:
+		{0,1} go to {1,0}
+
+	*/
 	botCell := binPose(pos[botID])
 	xdelta := botCell.x - paths[botID][0].x
 	ydelta := botCell.y - paths[botID][0].y
-	// make a box of of where each neighbor is
-	// 1 2 3
-	// 8   4
-	// 7 6 5
-	// left == +deg, right == -deg
-	if xdelta == 1 && ydelta == -1 {
-		rot = 45
-	}
-	if xdelta == 0 && ydelta == -1 {
-		rot = 0
-	}
-	if xdelta == -1 && ydelta == -1 {
-		rot = 315
-	}
-	if xdelta == -1 && ydelta == 0 {
-		rot = 270
-	}
-	if xdelta == -1 && ydelta == 1 {
-		rot = 225
-	}
-	if xdelta == 0 && ydelta == 1 {
-		rot = 180
-	}
-	if xdelta == 1 && ydelta == 1 {
-		rot = 135
-	}
-	if xdelta == 1 && ydelta == 0 {
-		rot = 90
-	}
-	fmt.Printf("%v\t%v\t%v\n", rot, botCell, paths[botID][0])
-	return (rot - int(pos[botID].r)) // calculate offset of rotation
+	// rot := (math.Atan((float64(ydelta) / float64(xdelta))) * 180 / math.Pi) - (pos[botID].r + 90)
+	rot := ((math.Atan2(float64(ydelta), float64(xdelta)) * 180 / math.Pi) + 180)
+	fmt.Printf(" calculated rotation: %v\n", rot-pos[botID].r)
+	return int(rot - pos[botID].r)
+	// // make a box of of where each neighbor is
+	// // 1 2 3
+	// // 8   4
+	// // 7 6 5
+	// // left == +deg, right == -deg
+	// if xdelta == 1 && ydelta == -1 {
+	// 	rot = 45
+	// }
+	// if xdelta == 0 && ydelta == -1 {
+	// 	rot = 0
+	// }
+	// if xdelta == -1 && ydelta == -1 {
+	// 	rot = 315
+	// }
+	// if xdelta == -1 && ydelta == 0 {
+	// 	rot = 270
+	// }
+	// if xdelta == -1 && ydelta == 1 {
+	// 	rot = 225
+	// }
+	// if xdelta == 0 && ydelta == 1 {
+	// 	rot = 180
+	// }
+	// if xdelta == 1 && ydelta == 1 {
+	// 	rot = 135
+	// }
+	// if xdelta == 1 && ydelta == 0 {
+	// 	rot = 90
+	// }
+	// fmt.Printf("%v\t%v\t%v\n", rot, botCell, paths[botID][0])
+	// return (rot - int(pos[botID].r)) // calculate offset of rotation
 }
 
 // greatest common divisor (GCD) via Euclidean algorithm
@@ -639,47 +647,115 @@ func lcm(a, b int, integers ...int) int {
 	return result
 }
 
+func sign(n int) int {
+	if n < 0 {
+		return -1
+	}
+	return 1
+}
+
+func updateOGM(s cell, e cell) {
+	// [start,end) == zero
+	// end == 1
+	// occupied ogm update rule:
+	ogm[e] += math.Log(odds / (1 - odds))
+	// y = mx+b
+	i := cell{x: s.x, y: s.y}
+	dx := e.x - s.x
+	dy := e.y - s.y
+	// sx := sign(dx)
+	sy := sign(dy)
+	seen := map[cell]bool{}
+	if dx == 0 {
+		for i != e {
+			seen[i] = true
+			i.y = i.y + sy
+		}
+	} else {
+		m := float64(dy) / float64(dx)
+		b := float64(s.y) - m*float64(s.x)
+		step := 1.0 / math.Abs(float64(dx))
+		if math.Abs(float64(dx)) < math.Abs(float64(dy)) {
+			step = 1.0 / math.Abs(float64(dy))
+		}
+		for i := int(float64(s.x) / step); i < int(float64(e.x)/step+float64(sign(e.x))); i = i + int(sign(dx)) {
+			seen[cell{x: int(float64(i) * step), y: int(m*float64(i)*step + b)}] = true
+		}
+	}
+	for k := range seen {
+		ogm[k] += math.Log((1 - odds) / odds)
+	}
+	// deltaOGM := float64(lcm(int(c.x-b.x), int(c.y-b.y)))
+	// if deltaOGM < 0 {
+	// 	deltaOGM *= 1
+	// }
+	// // fmt.Println(deltaOGM)
+	// seen := map[cell]bool{bb: true, cc: true}
+	// for t := 1.0; t < deltaOGM; t++ {
+	// 	a := binPose(pose{x: b.x + ((c.x - b.x) / t), y: b.y + ((c.y - b.y) / t)})
+	// 	// fmt.Printf("%v\t%v\n", pose{x: b.x + ((c.x - b.x) / t), y: b.y + ((c.y - b.y) / t)}, a)
+	// 	if !seen[a] {
+	// 		seen[a] = true
+	// 		// not occupied ogm update rule:
+	// 		ogm[a] += math.Log((1 - odds) / odds)
+	// 	}
+	// }
+	// fmt.Println(seen)
+}
+
 func policy(mpd *movPostData) {
 	// update current pose
-	pos[mpd.ID].r += mpd.Rot
-	d := math.Abs(mpd.Start - mpd.End)
-	pos[mpd.ID].x += d * math.Sin(pos[mpd.ID].r)
-	pos[mpd.ID].y += d * math.Cos(pos[mpd.ID].r)
+	pos[mpd.ID].r += mpd.Rot // degrees
+	for pos[mpd.ID].r > 360 {
+		pos[mpd.ID].r -= 360
+	}
+	d := mpd.Start - mpd.End
+	pos[mpd.ID].x += d * math.Cos(pos[mpd.ID].r*math.Pi/180) // sin/cos input radians
+	pos[mpd.ID].y += d * math.Sin(pos[mpd.ID].r*math.Pi/180)
+	// save current pose to "real" trajectory
+	// fmt.Println(traj)
+	traj[mpd.ID] = append(traj[mpd.ID], pos[mpd.ID])
+	// fmt.Println(traj[mpd.ID])
+	// fmt.Printf("  want to go to %v, am at %v (global %v)\n", paths[mpd.ID][0], binPose(pos[mpd.ID]), pos[mpd.ID])
+	// plan new actions
 	if mpd.Mov == "r" {
 		// update current rotation
-		pos[mpd.ID].r = pos[mpd.ID].r + mpd.Rot
+		// pos[mpd.ID].r = pos[mpd.ID].r + mpd.Rot
 		// tell bot to move forward
 		dist := math.Sqrt(math.Pow(pos[mpd.ID].x-xscale*float64(paths[mpd.ID][0].x), 2) + math.Pow(pos[mpd.ID].y-yscale*float64(paths[mpd.ID][0].y), 2))
 		// move forward
+		fmt.Printf("  asking to move forward %v cm.\n", dist)
 		doMovPost(movForward, int(dist), mpd.ID)
 		// remove from trajectory
 		paths[mpd.ID] = paths[mpd.ID][1:]
 	} else {
 		// take measurement
-		d = doUltPost(mpd.ID)
+		d := doUltPost(mpd.ID)
+		// partially account for ultrasonic max cm distance
+		if d > 500 {
+			d = math.Min(d, doUltPost(mpd.ID))
+		}
+		if d > 500 {
+			d = 500
+		}
 		// upate OGM based on current pose
 		fmt.Println("updating OGM.")
-		c := binPose(pose{x: d*math.Sin(pos[mpd.ID].r) + pos[mpd.ID].x, y: d*math.Cos(pos[mpd.ID].r) + pos[mpd.ID].y})
+		// fmt.Println(d)
+		// TODO CHECK
+		c := pose{x: d*math.Cos(pos[mpd.ID].r*math.Pi/180) + pos[mpd.ID].x, y: d*math.Sin(pos[mpd.ID].r*math.Pi/180) + pos[mpd.ID].y}
+		cc := binPose(c)
+		// fmt.Println(c)
 		// update all OGM values along path (use (1-odds)/odds for occupancy evidence of zero!)
 		// 1 / lcm( ending grid position - starting grid position )
-		b := binPose(pos[mpd.ID])
-		deltaOGM := 1 / math.Abs(float64(lcm(c.x-b.x, c.y-b.y)))
-		fmt.Printf(" %v\n", deltaOGM)
-		seen := map[cell]bool{b: true, c: true}
-		for t := 0.0; t < 1; t += deltaOGM {
-			a := binPose(pose{x: float64(b.x) + float64(c.x-b.x)*t, y: float64(b.y) + float64(c.y-b.y)*t})
-			if !seen[a] {
-				seen[a] = true
-				// not occupied ogm update rule:
-				ogm[a] += math.Log((1 - odds) / odds)
-			}
-		}
-		// occupied ogm update rule:
-		ogm[c] += math.Log(odds / (1 - odds))
+		b := pos[mpd.ID]
+		bb := binPose(b)
+		// fmt.Println(b)
+		updateOGM(bb, cc)
 		// new point?
-		if len(paths[mpd.ID]) < 2 {
+		if len(paths[mpd.ID]) == 0 {
+			// return // uncomment when you want a single trajectory you establish
 			fmt.Println("choosing new trajectory.")
-			paths[mpd.ID] = nil
+			paths[mpd.ID] = nil // not needed?
 			// select new point (POLICY -- we're doing some random/greedy policy here)
 			// -- pick K random cell points
 			// -- do BFS from point K_i to bot -> yield trajectory
@@ -700,7 +776,7 @@ func policy(mpd *movPostData) {
 				if rand.Intn(2)%2 == 0 {
 					yDelta *= -1
 				}
-				randCells = append(randCells, cell{b.x + xDelta, b.y + yDelta})
+				randCells = append(randCells, cell{bb.x + xDelta, bb.y + yDelta})
 			}
 			minIdx := 0
 			for i := 0; i < len(randCells); i++ {
@@ -712,7 +788,7 @@ func policy(mpd *movPostData) {
 			bfs(randCells[minIdx], mpd.ID) // void, will update botID's path
 		} // else, continue on same trajectory
 		// then tell bot to rotate
-		fmt.Println("sending rotation->move command.")
+		fmt.Println("  sending rotation->move command.")
 		doMovPost(movRotate, calculateRotation(mpd.ID), mpd.ID)
 	}
 }
@@ -721,7 +797,9 @@ func explore(expTime float64) {
 	if !localized {
 		// assume the bots are localized:
 		// and are pointing forward
-		pos = append(pos, pose{0, 0, 0}, pose{127, 0, 0}, pose{0, 127, 0})
+		pos = append(pos, []pose{pose{0, 0, 90}, pose{127, 0, 90}, pose{0, 127, 90}}...)
+		// example trajectory
+		// paths[0] = []cell{cell{0, 1}, cell{1, 0}, cell{0, -1}, cell{-1, 0}, cell{0, 1}, cell{0, 0}}
 		localized = true
 	}
 	ticker := time.NewTicker(1 * time.Second)
@@ -744,7 +822,9 @@ func explore(expTime float64) {
 	}()
 	time.Sleep(time.Duration(expTime) * time.Second)
 	done <- true
+	// fmt.Println(traj)
 	printOGM()
+	printTraj()
 }
 
 func printOGM() {
@@ -756,8 +836,6 @@ func printOGM() {
 		y = append(y, k.y)
 		z = append(z, e)
 	}
-	fmt.Printf("\nx=%v;\ny=%v;\nz=%v;\n\n", x, y, z)
-	// print as probability matrix
 	minX := 0
 	maxX := 0
 	for _, v := range x {
@@ -778,16 +856,37 @@ func printOGM() {
 			maxY = v
 		}
 	}
-	p := "p=[ "
+	// print as grid matrix
+	g := "\ng=[ "
 	for i := minX; i <= maxX; i++ {
 		for j := minY; j <= maxY; j++ {
-			p += fmt.Sprintf("%v ", ogm[cell{x: i, y: j}])
+			g += fmt.Sprintf("%v ", ogm[cell{x: i, y: j}])
 		}
-		p += "; "
+		g += "; "
 	}
-	p = p[:len(p)-2]
-	p += "];"
-	fmt.Println(p)
+	g = g[:len(g)-2]
+	g += "];"
+	fmt.Println(g)
+	// then just print as listof points in cell-space
+	fmt.Printf("\nx=%v;\ny=%v;\nz=%v;\n\n", x, y, z)
+}
+
+func printTraj() {
+	// print scaling factors
+	fmt.Printf("\n-----\nxs=%v;\nys=%v;\n", xscale, yscale)
+	// print list of points
+	for i := 0; i < len(traj); i++ {
+		fmt.Printf("%% robot %v trajectory:\n", i)
+		x := []float64{}
+		y := []float64{}
+		r := []float64{}
+		for _, p := range traj[i] {
+			x = append(x, p.x)
+			y = append(y, p.y)
+			r = append(r, p.r)
+		}
+		fmt.Printf("x%v=%v;\ny%v=%v;\nr%v=%v;\n\n", i, x, i, y, i, r)
+	}
 }
 
 // *** MAIN SERVER ***
@@ -798,6 +897,7 @@ func main() {
 	ogm = make(map[cell]float64)
 	bot = make([]string, 0) // num robots
 	pos = make([]pose, 0)   // num robots
+	traj = make([][]pose, 0)
 	remote = make(map[string]int)
 	clocks = make([]int64, 0)
 	loc = make(chan *locPostData, n)
@@ -862,6 +962,7 @@ func main() {
 				remote[r.RemoteAddr] = newID
 				clocks = append(clocks, t-reqBody.Clock) // move calculation up?
 				paths = append(paths, []cell{})
+				traj = append(traj, []pose{})
 			}
 
 			w.Write([]byte(strconv.Itoa(newID)))
