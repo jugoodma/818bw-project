@@ -231,16 +231,16 @@ long gyro_z() {
 
 float angle_delta(long old_z, long new_z, unsigned long old_time, unsigned long new_time) {
   // calculate the degrees of angles traveled over old_time to now
-  // (integrate)
+  // (integrate) TODO trapezoid rule
   return ((new_time - old_time)/1000.0)*((new_z-z_cal) / 32.8);
 }
 
 void move_rotate(short deg) {
-  // deg == how far to rotate (- == left, + == right)
+  // deg == how far to rotate (+ == left, - == right)
   unsigned long start_time = millis(), prev_time = millis(), curr_time = millis();
   long prev_z = gyro_z(), curr_z = gyro_z();
   float curr_angle = 0; // starting angle always zero, goal to equal deg
-  byte buf[sizeof(float)] = {0xf7};
+  byte buf[sizeof(float)] = {0xf7,0xf7};
   while(abs(curr_angle - deg) > rot_err && curr_time - start_time < 5000) {
     // take gyro_z reading
     prev_time = curr_time;
@@ -250,7 +250,7 @@ void move_rotate(short deg) {
     // add the angle change
     curr_angle += angle_delta(prev_z, curr_z, prev_time, curr_time);
     // LEFT == +deg, RIGHT == -deg
-    if(curr_angle - deg > 0) {
+    if (curr_angle - deg > 0) {
       motors_rig();
     } else {
       motors_lef();
@@ -260,7 +260,5 @@ void move_rotate(short deg) {
     delay(40);
   }
   Serial.write((byte *) buf, 2); // ack done
-//  long ang = (long) curr_angle;
-//  Serial.write((byte *) &ang, sizeof(long));
   Serial.write((byte *) &curr_angle, sizeof(float));
 }

@@ -518,68 +518,68 @@ var (
 	xscale    float64      = 10 // centimeters per cell
 	yscale    float64      = 10 // centimeters per cell
 	occThresh float64      = 2
-	odds      float64      = 0.85 // probability that occ(i,j)=1
+	odds      float64      = 0.7 // probability that occ(i,j)=1
 )
-
-func generatePath(start cell, hashList map[cell]cell) []cell { // hashList : child -> parent
-	list := make([]cell, 0)
-	key := start
-	val := hashList[start]
-	for key != hashList[val] {
-		// list = append([]cell{key}, list...) // it's a forward trajectory
-		list = append(list, key)
-		key = val
-		val = hashList[val]
-	}
-	return list // head == bot
-}
 
 func binPose(p pose) cell {
 	return cell{x: int(p.x / xscale), y: int(p.y / yscale)}
 }
 
-type bfsQNode struct {
-	child  cell
-	parent cell
+func generatePath(start cell, hashList map[cell]cell, origin cell) []cell { // hashList : child -> parent
+	list := make([]cell, 0)
+	curr := start
+	next := hashList[curr]
+	for curr != origin {
+		// list = append([]cell{key}, list...) // it's a forward trajectory
+		list = append(list, curr)
+		curr = next
+		next = hashList[next]
+	}
+	return list // head == bot
 }
 
-func bfs(origin cell, botID int) {
-	fmt.Println("performing BFS")
-	Q := make([]bfsQNode, 0)
-	listMap := make(map[cell]cell) // will create paths from any point back to origin
-	visited := make(map[cell]bool) // cords to bool
+type bfsQNode struct {
+	node     cell
+	cameFrom cell
+}
+
+func expand(path []cell) [][]cell {
+	neighbors := [][]cell{}
 	for a := -1; a < 2; a++ {
 		for b := -1; b < 2; b++ {
-			if a != 0 && b != 0 {
-				Q = append(Q, bfsQNode{child: cell{x: origin.x + a, y: origin.y + b}, parent: origin})
+			if a != 0 || b != 0 {
+				neighbors = append(neighbors, append([]cell{cell{x: path[0].x + a, y: path[0].y + b}}, path...))
 			}
 		}
 	}
+	return neighbors
+}
+
+func bfs(origin cell, botID int) {
+	fmt.Printf("BFS(%v) -> %v (%v)\n", origin, binPose(pos[botID]), pos[botID])
+	Q := make([][]cell, 0)
+	visited := make(map[cell]bool) // cell positions we have expanded already
 	botCell := binPose(pos[botID])
-	listMap[origin] = origin
+	Q = append(Q, []cell{origin}) // spark
 	for len(Q) > 0 {
-		val := Q[0]
-		Q = Q[1:]
-		listMap[val.child] = val.parent // add new link
-		if botCell.x == val.child.x && botCell.y == val.child.y {
+		path := Q[0]         // obtain top of queue
+		node := path[0]      // get node on path
+		Q = Q[1:]            // behead
+		if botCell == node { // is this the goal?
 			// found bot, update trajectory
 			fmt.Println("found bot!")
-			paths[botID] = generatePath(botCell, listMap)
+			paths[botID] = path
+			fmt.Printf("%v -> %v -> %v\n", botCell, paths[botID], origin)
 			break
-		} else if !visited[val.child] && math.Abs(ogm[val.child]) < occThresh {
-			visited[val.child] = true
-			for a := -1; a < 2; a++ {
-				for b := -1; b < 2; b++ {
-					if a != 0 && b != 0 {
-						Q = append(Q, bfsQNode{child: cell{x: val.child.x + a, y: val.child.y + b}, parent: val.child})
-					}
-				}
-			}
+		} else if !visited[node] && math.Abs(ogm[node]) < occThresh {
+			visited[node] = true
+			Q = append(Q, expand(path)...)
 		}
 	}
 }
 
 func calculateRotation(botID int) int {
+	fmt.Println("calculating rotation.")
 	rot := 0
 	botCell := binPose(pos[botID])
 	xdelta := botCell.x - paths[botID][0].x
@@ -614,7 +614,29 @@ func calculateRotation(botID int) int {
 		rot = 90
 	}
 	fmt.Printf("%v\t%v\t%v\n", rot, botCell, paths[botID][0])
-	return rot - int(pos[botID].r) // calculate offset of rotation
+	return (rot - int(pos[botID].r)) // calculate offset of rotation
+}
+
+// greatest common divisor (GCD) via Euclidean algorithm
+func gcd(a, b int) int {
+	for b != 0 {
+		t := b
+		b = a % b
+		a = t
+	}
+	return a
+}
+
+// find Least Common Multiple (LCM) via GCD
+func lcm(a, b int, integers ...int) int {
+	if a == 0 || b == 0 {
+		return 1
+	}
+	result := a * b / gcd(a, b)
+	for i := 0; i < len(integers); i++ {
+		result = lcm(result, integers[i])
+	}
+	return result
 }
 
 func policy(mpd *movPostData) {
@@ -630,49 +652,67 @@ func policy(mpd *movPostData) {
 		dist := math.Sqrt(math.Pow(pos[mpd.ID].x-xscale*float64(paths[mpd.ID][0].x), 2) + math.Pow(pos[mpd.ID].y-yscale*float64(paths[mpd.ID][0].y), 2))
 		// move forward
 		doMovPost(movForward, int(dist), mpd.ID)
+		// remove from trajectory
+		paths[mpd.ID] = paths[mpd.ID][1:]
 	} else {
 		// take measurement
 		d = doUltPost(mpd.ID)
 		// upate OGM based on current pose
+		fmt.Println("updating OGM.")
 		c := binPose(pose{x: d*math.Sin(pos[mpd.ID].r) + pos[mpd.ID].x, y: d*math.Cos(pos[mpd.ID].r) + pos[mpd.ID].y})
-		// TODO -- update all OGM values along path (use (1-odds)/odds for occupancy evidence of zero!)
-		// ogm update rule:
-		ogm[c] += math.Log(odds / (1 - odds))
-		// select new point (POLICY -- we're doing some random/greedy policy here)
-		// -- pick K random cell points
-		// -- do BFS from point K_i to bot -> yield trajectory
-		// -- select shortest trajectory that minimizes sum(abs(occupancy)) value
-		//   -- sort by total occ
-		//   -- of best L < K, choose shortest path
-		// -> output goal point
-		// TODO
-		randCells := make([]cell, 0)
-		K := 10
+		// update all OGM values along path (use (1-odds)/odds for occupancy evidence of zero!)
+		// 1 / lcm( ending grid position - starting grid position )
 		b := binPose(pos[mpd.ID])
-		for i := 0; i < K; i++ {
-			xDelta := rand.Intn(2) + 1
-			yDelta := rand.Intn(2) + 1
-			if rand.Intn(2)%2 == 0 {
-				xDelta *= -1
-			}
-			if rand.Intn(2)%2 == 0 {
-				yDelta *= -1
-			}
-
-			randCells = append(randCells, cell{b.x + xDelta, b.y + yDelta})
-		}
-		minIdx := 0
-		for i := 0; i < len(randCells); i++ {
-			if math.Abs(ogm[randCells[i]]) < math.Abs(ogm[randCells[minIdx]]) {
-				minIdx = i
+		deltaOGM := 1 / math.Abs(float64(lcm(c.x-b.x, c.y-b.y)))
+		fmt.Printf(" %v\n", deltaOGM)
+		seen := map[cell]bool{b: true, c: true}
+		for t := 0.0; t < 1; t += deltaOGM {
+			a := binPose(pose{x: float64(b.x) + float64(c.x-b.x)*t, y: float64(b.y) + float64(c.y-b.y)*t})
+			if !seen[a] {
+				seen[a] = true
+				// not occupied ogm update rule:
+				ogm[a] += math.Log((1 - odds) / odds)
 			}
 		}
+		// occupied ogm update rule:
+		ogm[c] += math.Log(odds / (1 - odds))
+		// new point?
 		if len(paths[mpd.ID]) < 2 {
+			fmt.Println("choosing new trajectory.")
 			paths[mpd.ID] = nil
+			// select new point (POLICY -- we're doing some random/greedy policy here)
+			// -- pick K random cell points
+			// -- do BFS from point K_i to bot -> yield trajectory
+			// -- select shortest trajectory that minimizes sum(abs(occupancy)) value
+			//   -- sort by total occ
+			//   -- of best L < K, choose shortest path
+			// -> output goal point
+			// TODO
+			randCells := make([]cell, 0)
+			K := 10
+			// b := binPose(pos[mpd.ID])
+			for i := 0; i < K; i++ {
+				xDelta := rand.Intn(2) + 1
+				yDelta := rand.Intn(2) + 1
+				if rand.Intn(2)%2 == 0 {
+					xDelta *= -1
+				}
+				if rand.Intn(2)%2 == 0 {
+					yDelta *= -1
+				}
+				randCells = append(randCells, cell{b.x + xDelta, b.y + yDelta})
+			}
+			minIdx := 0
+			for i := 0; i < len(randCells); i++ {
+				if math.Abs(ogm[randCells[i]]) < math.Abs(ogm[randCells[minIdx]]) {
+					minIdx = i
+				}
+			}
 			// calculate new trajectory
 			bfs(randCells[minIdx], mpd.ID) // void, will update botID's path
 		} // else, continue on same trajectory
 		// then tell bot to rotate
+		fmt.Println("sending rotation->move command.")
 		doMovPost(movRotate, calculateRotation(mpd.ID), mpd.ID)
 	}
 }
@@ -681,13 +721,16 @@ func explore(expTime float64) {
 	if !localized {
 		// assume the bots are localized:
 		// and are pointing forward
-		pos = append(pos, pose{0, 0, 0}, pose{10, 10, 0}, pose{-10, -10, 0})
+		pos = append(pos, pose{0, 0, 0}, pose{127, 0, 0}, pose{0, 127, 0})
 		localized = true
 	}
-	mov <- &movPostData{ID: 0, Mov: "m"} // spark it
 	ticker := time.NewTicker(1 * time.Second)
 	done := make(chan bool)
 	go func() {
+		// spark 'em
+		mov <- &movPostData{ID: 0, Mov: "m"}
+		mov <- &movPostData{ID: 1, Mov: "m"}
+		// mov <- &movPostData{ID: 2, Mov: "m"}
 		for {
 			select {
 			case <-done:
@@ -705,7 +748,46 @@ func explore(expTime float64) {
 }
 
 func printOGM() {
-	fmt.Printf("%v\n", ogm)
+	x := []int{0}
+	y := []int{0}
+	z := []float64{0}
+	for k, e := range ogm {
+		x = append(x, k.x)
+		y = append(y, k.y)
+		z = append(z, e)
+	}
+	fmt.Printf("\nx=%v;\ny=%v;\nz=%v;\n\n", x, y, z)
+	// print as probability matrix
+	minX := 0
+	maxX := 0
+	for _, v := range x {
+		if v < minX {
+			minX = v
+		}
+		if v > maxX {
+			maxX = v
+		}
+	}
+	minY := 0
+	maxY := 0
+	for _, v := range y {
+		if v < minY {
+			minY = v
+		}
+		if v > maxY {
+			maxY = v
+		}
+	}
+	p := "p=[ "
+	for i := minX; i <= maxX; i++ {
+		for j := minY; j <= maxY; j++ {
+			p += fmt.Sprintf("%v ", ogm[cell{x: i, y: j}])
+		}
+		p += "; "
+	}
+	p = p[:len(p)-2]
+	p += "];"
+	fmt.Println(p)
 }
 
 // *** MAIN SERVER ***

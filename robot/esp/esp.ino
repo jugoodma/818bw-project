@@ -350,13 +350,19 @@ void motor_sig(char sig, short param) {
     Serial.flush();
     // wait for finish signal
     ((unsigned long *) out_buf)[0] = 0x00000000;
-    while ((out_buf[0] ^ 0xf7) && (out_buf[1] ^ 0xf7)) {
-      out_buf[1] = out_buf[0];
-      out_buf[0] = Serial.read();
+//    send_debug(String(((unsigned long *) out_buf)[0]));
+    while ((out_buf[0] ^ 0xf7) || (out_buf[1] ^ 0xf7)) {
+      if (Serial.available()) {
+        out_buf[1] = out_buf[0];
+        out_buf[0] = Serial.read();
+//        send_debug(String(out_buf[0], HEX)+" "+String(out_buf[1], HEX));
+      }
       delay(1);
     }
+//    send_debug("hi there");
     float ang = 0;
     Serial.readBytes((byte *) &ang, sizeof(float));
+//    send_debug(String( ((long *) &ang)[0], HEX ));
 //    delay(250);
     // tell server what happened
     String message = "{\"id\":";
